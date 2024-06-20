@@ -1,0 +1,17 @@
+{
+  "APMSId": "", 
+  "AmiName": "",
+  "AmiCommitID": "",
+  "Environment": "",
+  "Region": "",
+  "AccountId": "",
+  "AccountName": "",
+  "CreatedBy": "Takeda-CPE-Team",
+  "Source": "GoldenAMIPipeline",
+  "OSName": "Amazon Linux 2",
+  "OSVersion": "7",
+  "CRNumber": "",
+  "AdditionalConfigurations": [],
+  "ToolsInstalled": [],
+  "AmiInfo": []
+}

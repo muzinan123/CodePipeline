@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites disabled="0" errors="0" failures="tss-failures" name="tss-name" tests="tss-test1" time="tss-test1" >
+    <testsuite disabled="0" errors="0" failures="tss-failures" name="tss-name" skipped="0" tests="tss-test1" time="tss-test1">
+<!-- TESTCASESTART  -->
+<!-- TESTCASESTOP -->
+    </testsuite>
+</testsuites>

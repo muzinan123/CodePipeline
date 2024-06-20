@@ -1,0 +1,1343 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Builds a CI/CD Pipeline to create a Golden AMI for AMZN2
+
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: AMI Configuration
+        Parameters:
+          - OperatingSystem
+      - Label:
+          default: CodeBuild - Network Configuration
+        Parameters:
+          - BuilderVPC
+          - BuilderPublicSubnet
+    ParameterLabels:
+      OperatingSystem:
+        default: Operating System
+      BuilderVPC:
+        default: VPC ID
+      BuilderPublicSubnet:
+        default: Subnet ID
+
+Parameters:
+  pSharedProdAccountNumber:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/accounts/SharedServices/Prod/id'
+  pRegion1Name:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/pipelinefactory/codepipeline/region1/name'
+  pCodePipelineActionFoundationalRole:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/pipelinefactory/codepipeline/iam/action/foundational'
+  pCodePipelineServiceFoundationalRole:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/pipelinefactory/codepipeline/iam/service/foundational'
+  OperatingSystem:
+    Type: String
+    Default: AMZN2
+    Description: 'Name of the repository, used for naming the Pipeline'
+  BuilderVPC:
+    Type: 'AWS::EC2::VPC::Id'
+    Description: VPC ID for CodeBuild
+  BuilderPublicSubnet:
+    Type: 'AWS::EC2::Subnet::Id'
+    Description: Public Subnet ID for CodeBuild
+
+Resources:
+  # -------------------------------------------
+  # Security Group for CodeStar activities
+  # -------------------------------------------
+  PackerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupDescription: !Sub A security group for Packer to build the ${OperatingSystem} Golden AMI
+      GroupName: !Sub TEC-SSV-${OperatingSystem}-USVGA-PACKER
+      SecurityGroupIngress: 
+        - Description: Inbound SSH traffic from VPC to allow Packer to connect
+          CidrIp: 10.216.222.0/23
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+      SecurityGroupEgress: 
+        - Description: All outbound traffic for Packer to pull artifacts
+          CidrIp: 0.0.0.0/0
+          FromPort: -1
+          IpProtocol: "-1"
+          ToPort: -1
+      VpcId: !Ref BuilderVPC
+      Tags: 
+        - Key: Name
+          Value: !Sub TEC-SSV-${OperatingSystem}-USVGA-PACKER
+
+  rPackerSecurityGroupParameterStore:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description: Shared Services Name
+      Name: !Sub "/tec/ami-pipeline/${OperatingSystem}/security-group"
+      Type: String
+      Value: !Ref PackerSecurityGroup
+
+  # -------------------------------------------
+  # CodeBuild Projects
+  # -------------------------------------------
+  CreateAMICodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${OperatingSystem}-Create-AMI'
+      Description: !Sub 'This CodeBuild project will be used to create a Golden AMI for ${OperatingSystem}'
+      LogsConfig: 
+        CloudWatchLogs: 
+          GroupName: !Ref CreateAMICodeBuildProjectLogGroup
+          Status: ENABLED
+      ServiceRole: !Ref pCodePipelineActionFoundationalRole
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: iac/CodeBuild/buildspec-createami.yaml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:5.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: BUILD_OUTPUT_BUCKET
+            Value: tec-cpe-shs-codepipeline-463173387112-us-east-1
+          - Name: BUILD_VPC_ID
+            Value: !Ref BuilderVPC
+          - Name: BUILD_SUBNET_ID
+            Value: !Ref BuilderPublicSubnet
+          - Name: CONFIG_FILE
+            Value: src/packer/packer-configuration.json
+      VpcConfig:
+        VpcId: !Ref BuilderVPC
+        Subnets:
+          - !Ref BuilderPublicSubnet
+        SecurityGroupIds:
+          - !Ref PackerSecurityGroup
+      TimeoutInMinutes: 60
+      EncryptionKey: arn:aws:kms:us-east-1:463173387112:key/6bca6283-7a96-43f9-a44d-16800f28bd0f
+
+  CreateAMICodeBuildProjectLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: !Sub '/aws/codebuild/golden-ami/${OperatingSystem}/Create-AMI'
+      RetentionInDays: 14  
+
+
+
+  OperationalReadinessTestCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${OperatingSystem}-Operational-Readiness-Test'
+      Description: !Sub 'This CodeBuild project will be used to test a Golden AMI for ${OperatingSystem}'
+      LogsConfig: 
+        CloudWatchLogs: 
+          GroupName: !Ref OperationalReadinessTestCodeBuildProjectLogGroup
+          Status: ENABLED
+      ServiceRole: !Ref pCodePipelineActionFoundationalRole
+      Artifacts:
+        Type: CODEPIPELINE
+      SecondaryArtifacts:
+        - ArtifactIdentifier: operational_readiness_test_results
+          Type: S3
+          Location: tec-cpe-shs-codepipeline-463173387112-us-east-1
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: iac/CodeBuild/buildspec-operationalReadinessTest.yaml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:5.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: BUILD_OUTPUT_BUCKET
+            Value: tec-cpe-shs-codepipeline-463173387112-us-east-1
+          - Name: BUILD_VPC_ID
+            Value: !Ref BuilderVPC
+          - Name: BUILD_SUBNET_ID
+            Value: !Ref BuilderPublicSubnet
+      VpcConfig:
+        VpcId: !Ref BuilderVPC
+        Subnets: 
+          - !Ref BuilderPublicSubnet
+        SecurityGroupIds: 
+          - !Ref PackerSecurityGroup
+      TimeoutInMinutes: 20
+      EncryptionKey: arn:aws:kms:us-east-1:463173387112:key/6bca6283-7a96-43f9-a44d-16800f28bd0f
+
+  OperationalReadinessTestCodeBuildProjectLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: !Sub '/aws/codebuild/golden-ami/${OperatingSystem}/Operational-Readiness-Test'
+      RetentionInDays: 14  
+
+
+  CopyAMICodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${OperatingSystem}-Copy-AMI'
+      Description: !Sub 'This CodeBuild project will be used to copy the AMI for ${OperatingSystem} to other regions within account'
+      LogsConfig: 
+        CloudWatchLogs: 
+          GroupName: !Ref CopyAMICodeBuildProjectLogGroup
+          Status: ENABLED
+      ServiceRole: !Ref pCodePipelineActionFoundationalRole
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: iac/CodeBuild/buildspec-copyami.yaml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:5.0
+        PrivilegedMode: true
+      VpcConfig:
+        VpcId: !Ref BuilderVPC
+        Subnets: 
+          - !Ref BuilderPublicSubnet
+        SecurityGroupIds: 
+          - !Ref PackerSecurityGroup
+      TimeoutInMinutes: 20
+      EncryptionKey: arn:aws:kms:us-east-1:463173387112:key/6bca6283-7a96-43f9-a44d-16800f28bd0f
+
+  CopyAMICodeBuildProjectLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: !Sub '/aws/codebuild/golden-ami/${OperatingSystem}/Copy-AMI'
+      RetentionInDays: 14
+
+  AutoDocsPreparationProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${OperatingSystem}-AutoDocs-Preparation'
+      Description: !Sub 'This CodeBuild project will be used to generate a report for AutoDocs for ${OperatingSystem}'
+      ServiceRole: !Ref pCodePipelineActionFoundationalRole
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: iac/CodeBuild/buildspec-autodocsPrep.yaml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:5.0
+        PrivilegedMode: true
+      VpcConfig:
+        VpcId: !Ref BuilderVPC
+        Subnets: 
+          - !Ref BuilderPublicSubnet
+        SecurityGroupIds: 
+          - !Ref PackerSecurityGroup
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: !Ref AutoDocsPreparationProjectLogGroup
+          Status: ENABLED
+      TimeoutInMinutes: 10
+      EncryptionKey: arn:aws:kms:us-east-1:463173387112:key/6bca6283-7a96-43f9-a44d-16800f28bd0f
+
+  AutoDocsPreparationProjectLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: !Sub '/aws/codebuild/golden-ami/${OperatingSystem}/AutoDocs-Preparation'
+      RetentionInDays: 14  
+
+  AutoDocsVerificationProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${OperatingSystem}-AutoDocs-Verification'
+      Description: !Sub 'This CodeBuild project validates the AMI for ${OperatingSystem} via AutoDocs'
+      ServiceRole: !Ref pCodePipelineActionFoundationalRole
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: iac/CodeBuild/buildspec-autodocsValidation.yaml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:5.0
+        PrivilegedMode: true
+      VpcConfig:
+        VpcId: !Ref BuilderVPC
+        Subnets: 
+          - !Ref BuilderPublicSubnet
+        SecurityGroupIds: 
+          - !Ref PackerSecurityGroup
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: !Ref AutoDocsVerificationProjectLogGroup
+          Status: ENABLED
+      TimeoutInMinutes: 10
+      EncryptionKey: arn:aws:kms:us-east-1:463173387112:key/6bca6283-7a96-43f9-a44d-16800f28bd0f
+
+  AutoDocsVerificationProjectLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: !Sub '/aws/codebuild/golden-ami/${OperatingSystem}/AutoDocs-Verification'
+      RetentionInDays: 14  
+      # KmsKeyId: arn:aws:kms:us-east-1:463173387112:key/6bca6283-7a96-43f9-a44d-16800f28bd0f
+
+  ReleaseVerificationCodeBuildProject: 
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${OperatingSystem}-Release-Verification'
+      Description: !Sub 'This CodeBuild project will be used to verify activities that are part of the AMI release for ${OperatingSystem}'
+      ServiceRole: !Ref pCodePipelineActionFoundationalRole
+      Artifacts:
+        Type: CODEPIPELINE
+      SecondaryArtifacts:
+        - ArtifactIdentifier: ami_release_results
+          Type: S3
+          Location: tec-cpe-shs-codepipeline-463173387112-us-east-1
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: iac/CodeBuild/buildspec-verifyRelease.yaml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:5.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: BUILD_OUTPUT_BUCKET
+            Value: tec-cpe-shs-codepipeline-463173387112-us-east-1
+          - Name: BUILD_VPC_ID
+            Value: !Ref BuilderVPC
+          - Name: BUILD_SUBNET_ID
+            Value: !Ref BuilderPublicSubnet
+          - Name: SNS_TOPIC
+            Value: !Ref snsTopic
+      VpcConfig:
+        VpcId: !Ref BuilderVPC
+        Subnets: 
+          - !Ref BuilderPublicSubnet
+        SecurityGroupIds: 
+          - !Ref PackerSecurityGroup
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: !Ref ReleaseVerificationCodeBuildProjectLogGroup
+          Status: ENABLED
+      TimeoutInMinutes: 20
+      EncryptionKey: arn:aws:kms:us-east-1:463173387112:key/6bca6283-7a96-43f9-a44d-16800f28bd0f
+
+  ReleaseVerificationCodeBuildProjectLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: !Sub '/aws/codebuild/${OperatingSystem}/Release-Verification'
+      RetentionInDays: 14  
+      # KmsKeyId: arn:aws:kms:us-east-1:463173387112:key/6bca6283-7a96-43f9-a44d-16800f28bd0f
+
+
+# -------------------------------------------
+# Nofications for the Pipeline
+# -------------------------------------------
+  snsTopic: 
+    Type: AWS::SNS::Topic
+    Properties: 
+      TopicName: !Sub '${OperatingSystem}-Golden-AMI-Pipeline'
+      DisplayName: !Sub '${OperatingSystem}-Golden-AMI-Pipeline'
+      KmsMasterKeyId: '{{ resolve:ssm:/tec/875633494741/sns/kms/id:1 }}'
+
+# -------------------------------------------
+# CloudWatch Event to Initiate CodePipeline
+# -------------------------------------------
+  rInitiateAmzn2PipelineEvent:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Ref GoldenAmiPipeline
+      Description: !Sub 'Amazon CloudWatch Events rule to automatically start the ${OperatingSystem} Golden AMI pipeline when a change occurs to the master branch'
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - "CodeCommit Repository State Change"
+        resources:
+          - !Sub arn:aws:codecommit:${pRegion1Name}:${AWS::AccountId}:TEC-AmazonLinux2-AMI-packer
+        detail:
+          referenceType:
+            - branch
+          referenceName:
+            - master
+      State: "ENABLED"
+      Targets:
+        - RoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/CodePipeline-Service-Foundational
+          Arn: !Sub arn:aws:codepipeline:${pRegion1Name}:${AWS::AccountId}:${GoldenAmiPipeline}
+          Id: !Sub "${OperatingSystem}_Golden_AMI_CodePipeline_V1"
+
+  # -------------------------------------------
+  # CodePipeline
+  # -------------------------------------------
+  GoldenAmiPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RestartExecutionOnUpdate: true
+      ArtifactStores:
+        - Region: !Ref pRegion1Name
+          ArtifactStore:
+            EncryptionKey:
+              Id: arn:aws:kms:us-east-1:463173387112:key/6bca6283-7a96-43f9-a44d-16800f28bd0f
+              Type: KMS
+            Location: tec-cpe-shs-codepipeline-463173387112-us-east-1
+            Type: S3
+      Name: !Sub '${OperatingSystem}-Golden-AMI-Pipeline'
+      RoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/${pCodePipelineServiceFoundationalRole}
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: CodeCommitCloneRef
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: '1'
+              Configuration:
+                RepositoryName: TEC-AmazonLinux2-AMI-packer
+                BranchName: master
+                PollForSourceChanges: false
+                OutputArtifactFormat: CODEBUILD_CLONE_REF
+              Namespace: GitVariables
+              OutputArtifacts:
+                - Name: CloneRefSource
+              RunOrder: 1
+              RoleArn: arn:aws:iam::875633494741:role/CodePipeline-Action-Foundational
+            - Name: CodeCommitCodeZip
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: '1'
+              Configuration:
+                RepositoryName: TEC-AmazonLinux2-AMI-packer
+                BranchName: master
+                PollForSourceChanges: false
+              OutputArtifacts:
+                - Name: CodeZipSource
+              RunOrder: 1
+              RoleArn: arn:aws:iam::875633494741:role/CodePipeline-Action-Foundational
+ 
+        # Do not remove/change the name of this Stage - mandatory for 'self-awareness' where Lambda function updates CodePipeline
+        - Name: BuildAndPackage
+          Actions:
+            # Do not remove/change the name (mandatory)
+            - Name: Update-CodePipeline 
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: "1"
+              Configuration:
+                FunctionName: ScanUpdateCodePipeline
+                UserParameters: |
+                  {
+                    "cfn_template": "iac/CloudFormation/CodePipeline.yaml",
+                    "cfn_parameter": "iac/CloudFormation/CodePipeline.json"
+                  }
+              InputArtifacts:
+                - Name: CodeZipSource
+              RoleArn: !Sub arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action
+              RunOrder: 1
+
+            # Build the AMI leveraging Packer
+            - Name: Build-AMI
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CreateAMICodeBuildProject
+                EnvironmentVariables: '[{"name":"BranchName","value":"#{GitVariables.BranchName}","type":"PLAINTEXT"}]'
+              InputArtifacts:
+                - Name: CloneRefSource
+              OutputArtifacts:
+                - Name: BuildAMIDev
+              RunOrder: 2
+
+            # Test the OS configuration and the installed tools 
+            - Name: Test-AMI
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref OperationalReadinessTestCodeBuildProject
+                EnvironmentVariables: '[{"name":"BranchName","value":"#{GitVariables.BranchName}","type":"PLAINTEXT"}, {"name":"ArtifactName","value":"BuildAMIDev","type":"PLAINTEXT"}, {"name":"Environment","value":"Development","type":"PLAINTEXT"}]'
+                PrimarySource: CloneRefSource
+              InputArtifacts:
+                - Name: CloneRefSource
+                - Name: BuildAMIDev
+              OutputArtifacts:
+                - Name: TestAMIDev
+              RunOrder: 3
+
+            # Copy and Encrypt the AMI to each region
+            - Name: Copy-AMI-To-Regions
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CopyAMICodeBuildProject
+                EnvironmentVariables: '[{"name":"ArtifactName","value":"BuildAMIDev","type":"PLAINTEXT"}]'
+                PrimarySource: CloneRefSource
+              InputArtifacts:
+                - Name: CloneRefSource
+                - Name: BuildAMIDev
+              OutputArtifacts:
+                - Name: DevAMI  
+              RunOrder: 4
+            # Validate the AMI exists and is encrypted
+            - Name: AMI-Verification
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-AMI-Validate-AMI-Fun
+                UserParameters: "{\"AccountType\":\"DEV\"}"
+              InputArtifacts:
+                - Name: DevAMI
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 5
+
+            # Generate payload for AutoDocs
+            - Name: AutoDocs-Preparation
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref AutoDocsPreparationProject
+                EnvironmentVariables: '[{"name":"BranchName","value":"#{GitVariables.BranchName}","type":"PLAINTEXT"}, {"name":"orcArtifactName","value":"TestAMIDev","type":"PLAINTEXT"}, {"name":"amiArtifactName","value":"DevAMI","type":"PLAINTEXT"}, {"name":"Environment","value":"Development","type":"PLAINTEXT"}]'
+                PrimarySource: CloneRefSource
+              InputArtifacts:
+                - Name: CloneRefSource
+                - Name: TestAMIDev
+                - Name: DevAMI
+              OutputArtifacts:
+                - Name: AutoDocsPreparationDev
+              RunOrder: 5
+
+            # Send payload to AutoDocs
+            - Name: AutoDocs-Verification
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref AutoDocsVerificationProject
+                EnvironmentVariables: '[{"name":"BranchName","value":"#{GitVariables.BranchName}","type":"PLAINTEXT"}, {"name":"AutoDocArtifactName","value":"AutoDocsPreparationDev","type":"PLAINTEXT"}, {"name":"Environment","value":"Development","type":"PLAINTEXT"}]'
+                PrimarySource: CloneRefSource
+              InputArtifacts:
+                - Name: CloneRefSource
+                - Name: AutoDocsPreparationDev
+              OutputArtifacts:
+                - Name: AutoDocsVerificationDev
+              RunOrder: 6
+        - Name: Operational-Readiness-Approval-Gate
+          Actions:
+            - Name: Approval-for-ORT
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: "1"
+              # Configuration:
+              #   NotificationArn: !Sub arn:aws:sns:${pRegion1Name}:${pSharedProdAccountNumber}:DeliveryPipelineManualApproval
+              #   CustomData: !Sub |
+              #     {
+              #       "PipelineAccount": ${pDeplAccountNumber}
+              #     }
+              # RoleArn: !Sub arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action
+              RunOrder: 1
+        - Name: Operational-Readiness-Testing
+          Actions:
+            # Copy the encrypted AMI to each region
+            - Name: Copy-AMI-To-Test-Account
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Copy-Func
+                UserParameters: "{\r\n   \"Path\":\"DEV_TST\"\r\n}"
+              InputArtifacts:
+                - Name: DevAMI
+              OutputArtifacts:
+                - Name: TestAMI
+              RoleArn: !Sub arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action
+              RunOrder: 1
+            # Step function to wait until the copy is complete
+            - Name: Get-AMI-Copy-Status
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: StepFunctions
+                Version: "1"
+              Configuration:
+                StateMachineArn: !Sub >-
+                  arn:aws:states:${AWS::Region}:${pSharedProdAccountNumber}:stateMachine:TEC-AMI-Operations
+                InputType: FilePath
+                Input: ami_artifacts_tst.json
+              RoleArn: !Sub >-
+                arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action
+              InputArtifacts:
+                - Name: TestAMI
+              RunOrder: 2
+            # Copy the tags to the new AMI
+            - Name: Tag-AMI
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Utilities-Tag-Resources
+                UserParameters: "{\r\n   \"Path\":\"DEV_TST\"\r\n}"
+              InputArtifacts:
+                - Name: TestAMI
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 3
+            # Test the OS configuration and the installed tools 
+            - Name: Operational-Readiness-Testing
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref OperationalReadinessTestCodeBuildProject
+                EnvironmentVariables: '[{"name":"BranchName","value":"#{GitVariables.BranchName}","type":"PLAINTEXT"}, {"name":"ArtifactName","value":"TestAMI","type":"PLAINTEXT"}, {"name":"Environment","value":"Test","type":"PLAINTEXT"}]'
+                PrimarySource: CloneRefSource
+              InputArtifacts:
+                - Name: CloneRefSource
+                - Name: TestAMI
+              OutputArtifacts:
+                - Name: AmiOrt
+              RunOrder: 4
+            # Validate the AMI exists and is encrypted
+            - Name: AMI-Verification
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-AMI-Validate-AMI-Fun
+                UserParameters: "{\"AccountType\":\"TST\"}"
+              InputArtifacts:
+                - Name: TestAMI
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 4
+            # Generate payload for AutoDocs
+            - Name: AutoDocs-Preparation
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref AutoDocsPreparationProject
+                EnvironmentVariables: '[{"name":"BranchName","value":"#{GitVariables.BranchName}","type":"PLAINTEXT"}, {"name":"orcArtifactName","value":"AmiOrt","type":"PLAINTEXT"}, {"name":"amiArtifactName","value":"TestAMI","type":"PLAINTEXT"}, {"name":"Environment","value":"Test","type":"PLAINTEXT"}]'
+                PrimarySource: CloneRefSource
+              InputArtifacts:
+                - Name: CloneRefSource
+                - Name: AmiOrt
+                - Name: TestAMI
+              OutputArtifacts:
+                - Name: AutoDocsPreparationTst
+              RunOrder: 5
+            # Notify relevant parties that tests were successful
+            - Name: AMI-Operational-Notification-TST
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Notify-Func
+                UserParameters: "{\r\n   \"AccountType\":\"CopyAMI_TST\"\r\n}"
+              InputArtifacts:
+                - Name: TestAMI
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 5
+            # # Send payload to AutoDocs
+            - Name: AutoDocs-Verification
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref AutoDocsVerificationProject
+                EnvironmentVariables: '[{"name":"BranchName","value":"#{GitVariables.BranchName}","type":"PLAINTEXT"}, {"name":"AutoDocArtifactName","value":"AutoDocsPreparationTst","type":"PLAINTEXT"}, {"name":"Environment","value":"Test","type":"PLAINTEXT"}]'
+                PrimarySource: CloneRefSource
+              InputArtifacts:
+                - Name: CloneRefSource
+                - Name: AutoDocsPreparationTst
+              OutputArtifacts:
+                - Name: AutoDocsVerificationTst
+              RunOrder: 6
+        - Name: Production-Environment-Approval-Gate
+          Actions:
+            - Name: Approval-for-Production
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: "1"
+              Configuration:
+                NotificationArn: !Sub arn:aws:sns:${pRegion1Name}:${pSharedProdAccountNumber}:DeliveryPipelineManualApproval
+                # CustomData: !Sub |
+                #   {
+                #     "PipelineAccount": ${pDeplAccountNumber}
+                #   }
+              RoleArn: !Sub arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action
+              RunOrder: 1
+        - Name: Production-Verification
+          Actions:
+            # Copy the encrypted AMI to each region
+            - Name: Copy-AMI-To-Production-Account
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Copy-Func
+                UserParameters: "{\r\n   \"Path\":\"TST_PRD\"\r\n}"
+              InputArtifacts:
+                - Name: TestAMI
+              OutputArtifacts:
+                - Name: ProductionAMI
+              RoleArn: !Sub arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action
+              RunOrder: 1
+            # Step function to wait until the copy is complete
+            - Name: Get-AMI-Copy-Status
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: StepFunctions
+                Version: "1"
+              Configuration:
+                StateMachineArn: !Sub >-
+                  arn:aws:states:${AWS::Region}:${pSharedProdAccountNumber}:stateMachine:TEC-AMI-Operations
+                InputType: FilePath
+                Input: ami_artifacts_prd.json
+              RoleArn: !Sub >-
+                arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action
+              InputArtifacts:
+                - Name: ProductionAMI
+              RunOrder: 2
+            # Copy the tags to the new AMI
+            - Name: Tag-AMI
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Utilities-Tag-Resources
+                UserParameters: "{\r\n   \"Path\":\"TST_PRD\"\r\n}"
+              InputArtifacts:
+                - Name: ProductionAMI
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 3
+            # Generate payload for AutoDocs
+            - Name: AutoDocs-Preparation
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref AutoDocsPreparationProject
+                EnvironmentVariables: '[{"name":"BranchName","value":"#{GitVariables.BranchName}","type":"PLAINTEXT"}, {"name":"orcArtifactName","value":"AmiOrt","type":"PLAINTEXT"}, {"name":"amiArtifactName","value":"ProductionAMI","type":"PLAINTEXT"}, {"name":"Environment","value":"Production","type":"PLAINTEXT"}]'
+                PrimarySource: CloneRefSource
+              InputArtifacts:
+                - Name: CloneRefSource
+                - Name: AmiOrt
+                - Name: ProductionAMI
+              OutputArtifacts:
+                - Name: AutoDocsPreparationPrd
+              RunOrder: 3
+            # Validate the AMI exists and is encrypted
+            - Name: AMI-Verification
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-AMI-Validate-AMI-Fun
+                UserParameters: "{\"AccountType\":\"PRD\"}"
+              InputArtifacts:
+                - Name: ProductionAMI
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 4
+
+            # Send payload to AutoDocs for IQ/OQ
+            - Name: AutoDocs-Verification
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref AutoDocsVerificationProject
+                EnvironmentVariables: '[{"name":"BranchName","value":"#{GitVariables.BranchName}","type":"PLAINTEXT"}, {"name":"AutoDocArtifactName","value":"AutoDocsPreparationPrd","type":"PLAINTEXT"}, {"name":"Environment","value":"Production","type":"PLAINTEXT"}]'
+                PrimarySource: CloneRefSource
+              InputArtifacts:
+                - Name: CloneRefSource
+                - Name: AutoDocsPreparationPrd
+              OutputArtifacts:
+                - Name: AutoDocsVerificationPrd
+              RunOrder: 4
+            # Notify relevant parties that tests were successful
+            - Name: AMI-Operational-Notification-PRD
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Notify-Func
+                UserParameters: "{\r\n   \"AccountType\":\"CopyAMI_PRD\"\r\n}"
+              InputArtifacts:
+                - Name: ProductionAMI
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 5
+            # Manual gate put in place to hold pipeline while AutoDocs report is reviewed
+            - Name: Approval-for-Release-to-Functional-Accounts
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: "1"
+              # Configuration:
+              #   NotificationArn: !Sub arn:aws:sns:${pRegion1Name}:${pSharedProdAccountNumber}:DeliveryPipelineManualApproval
+              #   CustomData: !Sub |
+              #     {
+              #       "PipelineAccount": ${pDeplAccountNumber}
+              #     }
+              # RoleArn: !Sub arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action
+              RunOrder: 6
+            # Release preparation - DynamoDB, param store, etc
+            - Name: Release-Preparation
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Dynamo-Func
+                UserParameters: "{\r\n   \"CommitId\":\"#{GitVariables.CommitId}\"\r\n}"
+              InputArtifacts:
+                - Name: ProductionAMI
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 7
+            # Test/validate parameter store was updated
+            - Name: Release-Preparation-Verification
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref ReleaseVerificationCodeBuildProject
+                EnvironmentVariables: '[{"name":"BranchName","value":"#{GitVariables.BranchName}","type":"PLAINTEXT"}, {"name":"AutoDocsPreparationArtifactName","value":"AutoDocsPreparationPrd","type":"PLAINTEXT"}]'
+                PrimarySource: CloneRefSource
+              InputArtifacts:
+                - Name: CloneRefSource
+                - Name: AutoDocsPreparationPrd
+              OutputArtifacts:
+                - Name: ReleasePreparationVerificationPrd
+              RunOrder: 8
+        - Name: Release-AMI-to-Functional-Account
+          Actions:
+            # Get list of accounts to share with
+            - Name: LambdaSplitOrgAccounts
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-GetOrg-Func
+              InputArtifacts:
+                - Name: ProductionAMI
+              OutputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 1
+
+            # Share with Development accounts
+            - Name: TEC-Development-Accounts-US-East-1
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"us-east-1\",\r\n   \"AccountType\":\"dev\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 2
+            - Name: TEC-Development-Accounts-US-West-2
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"us-west-2\",\r\n   \"AccountType\":\"dev\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 2
+            - Name: TEC-Development-Accounts-EU-West-1
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"eu-west-1\",\r\n   \"AccountType\":\"dev\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 2
+            - Name: TEC-Development-Accounts-EU-Central-1
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"eu-central-1\",\r\n   \"AccountType\":\"dev\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 2
+            - Name: TEC-Development-Accounts-AP-Southeast-1
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"ap-southeast-1\",\r\n   \"AccountType\":\"dev\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 2
+            - Name: TEC-Development-Accounts-AP-Northeast-1
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"ap-northeast-1\",\r\n   \"AccountType\":\"dev\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 2
+
+            # Share with Test accounts
+            - Name: TEC-Test-Accounts-US-East-1
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"us-east-1\",\r\n   \"AccountType\":\"tst\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 3
+            - Name: TEC-Test-Accounts-US-West-2
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"us-west-2\",\r\n   \"AccountType\":\"tst\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 3
+            - Name: TEC-Test-Accounts-EU-West-1
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"eu-west-1\",\r\n   \"AccountType\":\"tst\"\r\n}"
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              InputArtifacts:
+                - Name: LambdaSplit
+              RunOrder: 3
+            - Name: TEC-Test-Accounts-EU-Central-1
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"eu-central-1\",\r\n   \"AccountType\":\"tst\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 3
+            - Name: TEC-Test-Accounts-AP-Southeast-1
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"ap-southeast-1\",\r\n   \"AccountType\":\"tst\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 3
+            - Name: TEC-Test-Accounts-AP-Northeast-1
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"ap-northeast-1\",\r\n   \"AccountType\":\"tst\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 3
+
+            # Share with Deployment accounts
+            - Name: TEC-Deployment-Accounts-US-East-1
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"us-east-1\",\r\n   \"AccountType\":\"dep\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 4
+            - Name: TEC-Deployment-Accounts-US-West-2
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"us-west-2\",\r\n   \"AccountType\":\"dep\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 4
+            - Name: TEC-Deployment-Accounts-EU-West-1
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"eu-west-1\",\r\n   \"AccountType\":\"dep\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 4
+            - Name: TEC-Deployment-Accounts-EU-Central-1
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"eu-central-1\",\r\n   \"AccountType\":\"dep\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 4
+            - Name: TEC-Deployment-Accounts-AP-Southeast-1
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"ap-southeast-1\",\r\n   \"AccountType\":\"dep\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 4
+            - Name: TEC-Deployment-Accounts-AP-Northeast-1
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"ap-northeast-1\",\r\n   \"AccountType\":\"dep\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 4
+            
+            # Share AMI with regions in SBX
+            - Name: US-East-1-Sandbox-Accounts
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"us-east-1\",\r\n   \"AccountType\":\"sbx\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 5
+            - Name: US-West-2-Sandbox-Accounts
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"us-west-2\",\r\n   \"AccountType\":\"sbx\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 5
+            - Name: EU-West-1-Sandbox-Accounts
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"eu-west-1\",\r\n   \"AccountType\":\"sbx\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 5
+            - Name: EU-Central-1-Sandbox-Accounts
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"eu-central-1\",\r\n   \"AccountType\":\"sbx\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 5
+            - Name: AP-Southeast-1-Sandbox-Accounts
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"ap-southeast-1\",\r\n   \"AccountType\":\"sbx\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 5
+            - Name: AP-Northeast-1-Sandbox-Accounts
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"ap-northeast-1\",\r\n   \"AccountType\":\"sbx\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 5
+            # Share AMI with regions in PRD
+            - Name: TEC-Production-Accounts-US-East-1
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"us-east-1\",\r\n   \"AccountType\":\"prd\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 6
+            - Name: TEC-Production-Accounts-US-West-2
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"us-west-2\",\r\n   \"AccountType\":\"prd\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 6
+            - Name: TEC-Production-Accounts-EU-West-1
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"eu-west-1\",\r\n   \"AccountType\":\"prd\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 6
+            - Name: TEC-Production-Accounts-EU-Central-1
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"eu-central-1\",\r\n   \"AccountType\":\"prd\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 6
+            - Name: TEC-Production-Accounts-AP-Southeast-1
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"ap-southeast-1\",\r\n   \"AccountType\":\"prd\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 6
+            - Name: TEC-Production-Accounts-AP-Northeast-1
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Share-Func
+                UserParameters: "{\r\n   \"shareRegion\":\"ap-northeast-1\",\r\n   \"AccountType\":\"prd\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 6
+            # Generate payload for AutoDocs to validate an AMI in a functional account
+            - Name: AutoDocs-Preparation
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref AutoDocsPreparationProject
+                EnvironmentVariables: '[{"name":"BranchName","value":"#{GitVariables.BranchName}","type":"PLAINTEXT"}, {"name":"orcArtifactName","value":"AmiOrt","type":"PLAINTEXT"}, {"name":"amiArtifactName","value":"ProductionAMI","type":"PLAINTEXT"}, {"name":"Environment","value":"Functional","type":"PLAINTEXT"}]'
+                PrimarySource: CloneRefSource
+              InputArtifacts:
+                - Name: CloneRefSource
+                - Name: AmiOrt
+                - Name: ProductionAMI
+              OutputArtifacts:
+                - Name: AutoDocsPreparationFunctional
+              RunOrder: 7
+            # Validate the AMI exists and is encrypted. Test/validate parameter store was updated in remote Functional account.
+            - Name: AMI-Verification
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-AMI-Validate-AMI-Fun
+                UserParameters: "{\"AccountType\":\"FUNCTIONAL\"}"
+              InputArtifacts:
+                - Name: AutoDocsPreparationFunctional
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 8
+            # Send payload to AutoDocs
+            - Name: AutoDocs-Verification
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref AutoDocsVerificationProject
+                EnvironmentVariables: '[{"name":"BranchName","value":"#{GitVariables.BranchName}","type":"PLAINTEXT"}, {"name":"AutoDocArtifactName","value":"AutoDocsPreparationFunctional","type":"PLAINTEXT"}, {"name":"Environment","value":"Functional","type":"PLAINTEXT"}]'
+                PrimarySource: CloneRefSource
+              InputArtifacts:
+                - Name: CloneRefSource
+                - Name: AutoDocsPreparationFunctional
+              OutputArtifacts:
+                - Name: AutoDocsVerificationFunctional
+              RunOrder: 8
+            # Notify relevant parties that a new AMI has been released
+            - Name: AMI-Release-Notification
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-Golden-AMI-Notify-Func
+                UserParameters: "{\r\n   \"AccountType\":\"DEV TST DEP PRD\"\r\n}"
+              InputArtifacts:
+                - Name: LambdaSplit
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 9

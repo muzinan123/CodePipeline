@@ -1,0 +1,75 @@
+[
+    {
+        "ParameterKey": "pCodePipelineActionRole",
+        "ParameterValue": "/pipelinefactory/codepipeline/iam/action",
+        "ResolvedValue": "CodePipeline-Action"
+    },
+    {
+        "ParameterKey": "pSharedDeplAccountNumber",
+        "ParameterValue": "/accounts/SharedServices/Depl/id",
+        "ResolvedValue": "463173387112"
+    },
+    {
+        "ParameterKey": "pDevAccountNumber",
+        "ParameterValue": "/accounts/dev/id",
+        "ResolvedValue": "875633494741"
+    },
+    {
+        "ParameterKey": "pMasterAccountNumber",
+        "ParameterValue": "/accounts/Master/id",
+        "ResolvedValue": "144362435571"
+    },
+    {
+        "ParameterKey": "pRegion1CodePipelineKmsKey",
+        "ParameterValue": "/pipelinefactory/codepipeline/region1/kmskeyarn",
+        "ResolvedValue": "arn:aws:kms:us-east-1:463173387112:key/6bca6283-7a96-43f9-a44d-16800f28bd0f"
+    },
+    {
+        "ParameterKey": "pDeplAccountNumber",
+        "ParameterValue": "/accounts/depl/id",
+        "ResolvedValue": "463173387112"
+    },
+    {
+        "ParameterKey": "pRegion1Name",
+        "ParameterValue": "/pipelinefactory/codepipeline/region1/name",
+        "ResolvedValue": "us-east-1"
+    },
+    {
+        "ParameterKey": "pSharedProdAccountNumber",
+        "ParameterValue": "/accounts/SharedServices/Prod/id",
+        "ResolvedValue": "012096835438"
+    },
+    {
+        "ParameterKey": "pTestAccountNumber",
+        "ParameterValue": "/accounts/test/id",
+        "ResolvedValue": "271554166616"
+    },
+    {
+        "ParameterKey": "pProdAccountNumber",
+        "ParameterValue": "/accounts/prod/id",
+        "ResolvedValue": "012096835438"
+    },
+    {
+        "ParameterKey": "pProduct",
+        "ParameterValue": "TEC-AMI-Validate-AMI-Fun"
+    },
+    {
+        "ParameterKey": "pRegion1CodePipelineArtifactBucket",
+        "ParameterValue": "/pipelinefactory/codepipeline/region1/s3bucket",
+        "ResolvedValue": "tec-cpe-shs-codepipeline-463173387112-us-east-1"
+    },
+    {
+        "ParameterKey": "pCodePipelineServiceRole",
+        "ParameterValue": "/pipelinefactory/codepipeline/iam/service",
+        "ResolvedValue": "CodePipeline-Service"
+    },
+    {
+        "ParameterKey": "pTeam",
+        "ParameterValue": "tec-cpe-shs"
+    },
+    {
+        "ParameterKey": "pCodeBuildRole",
+        "ParameterValue": "/pipelinefactory/codebuild/iam",
+        "ResolvedValue": "CodeBuild-Action"
+    }
+]

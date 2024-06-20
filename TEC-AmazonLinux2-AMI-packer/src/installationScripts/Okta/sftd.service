@@ -1,0 +1,14 @@
+[Unit]
+Description=ScaleFT Daemon
+After=update-hostname.service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStartPost=/bin/sleep 30
+ExecStart=/usr/sbin/sftd
+Restart=always
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target

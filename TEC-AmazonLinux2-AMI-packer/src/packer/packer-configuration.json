@@ -1,0 +1,233 @@
+{
+  "variables": {
+    "ami_name": "TEC_AMZN2_{{timestamp}}",
+    "username":    "{{ aws_secretsmanager `jfrog/app/creds` `artifactory_user_ro` }}",
+    "pass":        "{{ aws_secretsmanager `jfrog/app/creds` `artifactory_pwd_ro` }}",
+    "tokenized":   "{{ aws_secretsmanager `jfrog/app/rapid` `rapid_token` }}",
+    "crowdstrike": "{{ aws_secretsmanager `jfrog/app/crowdstrike` `crowdstrike_cid` }}",
+    "aws_region": "us-east-1",
+    "VPC": "{{ env `BUILD_VPC_ID` }}",
+    "Subnet": "{{ env `BUILD_SUBNET_ID` }}",
+    "CODEBUILD_BUILD_ID": "{{ env `CODEBUILD_BUILD_ID` }}",
+    "CODEBUILD_RESOLVED_SOURCE_VERSION": "{{ env `CODEBUILD_RESOLVED_SOURCE_VERSION` }}",
+    "CODEBUILD_BUILD_NUMBER": "{{ env `CODEBUILD_BUILD_NUMBER` }}"
+  },
+  "sensitive-variables" : ["username", "pass", "tokenized", "crowdstrike"],
+  "builders": [
+    {
+      "type": "amazon-ebs",
+      "region": "us-east-1",
+      "kms_key_id": "arn:aws:kms:us-east-1:012096835438:key/0bf85fdb-196b-4bef-bfda-736a1904bd64",
+      "ami_name": "{{ user `ami_name` }}",
+      "vpc_id": "{{ user `VPC` }}",
+      "subnet_id": "{{ user `Subnet` }}",
+      "security_group_filter": {
+        "filters": {
+          "tag:Name": "TEC-SSV-AMZN2-USVGA-PACKER"
+        }
+      },
+      "source_ami_filter": {
+        "filters": {
+          "virtualization-type": "hvm",
+          "name": "amzn2-ami-hvm-2.0.20210126.0-x86_64-gp2",
+          "root-device-type": "ebs"
+        },
+        "owners": [
+          "amazon"
+        ],
+        "most_recent": true
+      },
+      "instance_type": "t3.xlarge",
+      "encrypt_boot": true,
+      "run_tags": {
+        "Name":                 "CPE-GoldenAMIPipeline-AMZN2-{{ timestamp }}",
+        "OS_Version":           "AMZN2",
+        "AWS_Commit_ID":         "{{ user `CODEBUILD_RESOLVED_SOURCE_VERSION` }}",
+        "AWS_Build_ID":          "{{ user `CODEBUILD_BUILD_ID` }}",
+        "AWS_Build_Number":      "{{ user `CODEBUILD_BUILD_NUMBER` }}",
+        "APPLICATION_NAME":     "CPE-GoldenAMIPipeline-AMZN2-{{ timestamp }}",
+        "apms-id":               "ECS-CPE-Development",
+        "ASEC_UPD":              "yum",
+        "BUSINESS_CRITICALITY":  "Low",
+        "business-unit-n1":      "CTO",
+        "business-unit-n2":      "CTO-ECS-Tech",
+        "COMPLIANCE-GDPR":       "false",
+        "COMPLIANCE-GxP":        "false",
+        "COMPLIANCE-HIPAA":      "false",
+        "COMPLIANCE-PII":        "false",
+        "COMPLIANCE-SOX":        "false",
+        "DATA_COMPLIANCE":       "public",
+        "ENVIRONMENT_ID":        "dev",
+        "it-technical-owner":    "thomas.christopoulos@takeda.com",
+        "it-business-owner":     "ryan.pehrson@takeda.com",
+        "SCHEDULE":              "scheduler=none",
+        "ami-pipeline-instance": "true"
+      },
+      "run_volume_tags": {
+        "Name":                 "CPE-GoldenAMIPipeline-AMZN2-{{ timestamp }}",
+        "OS_Version":           "AMZN2",
+        "AWS_Commit_ID":         "{{ user `CODEBUILD_RESOLVED_SOURCE_VERSION` }}",
+        "AWS_Build_ID":          "{{ user `CODEBUILD_BUILD_ID` }}",
+        "AWS_Build_Number":      "{{ user `CODEBUILD_BUILD_NUMBER` }}",
+        "APPLICATION_NAME":     "CPE-GoldenAMIPipeline-AMZN2-{{ timestamp }}",
+        "apms-id":               "ECS-CPE-Development",
+        "ASEC_UPD":              "yum",
+        "BUSINESS_CRITICALITY":  "Low",
+        "business-unit-n1":      "CTO",
+        "business-unit-n2":      "CTO-ECS-Tech",
+        "COMPLIANCE-GDPR":       "false",
+        "COMPLIANCE-GxP":        "false",
+        "COMPLIANCE-HIPAA":      "false",
+        "COMPLIANCE-PII":        "false",
+        "COMPLIANCE-SOX":        "false",
+        "DATA_COMPLIANCE":       "public",
+        "ENVIRONMENT_ID":        "dev",
+        "it-technical-owner":    "thomas.christopoulos@takeda.com",
+        "it-business-owner":     "ryan.pehrson@takeda.com",
+        "SCHEDULE":              "scheduler=none",
+        "ami-pipeline-instance": "true"
+      },
+      "tags": {
+        "Name":             "{{ user `ami_name` }}",
+        "OS_Version":       "AMZN2",
+        "Source_AMI_Name":  "{{ .SourceAMIName }}",
+        "Source_AMI_ID":    "{{ .SourceAMI }}",
+        "AWS_Commit_ID":    "{{ user `CODEBUILD_RESOLVED_SOURCE_VERSION` }}",
+        "AWS_Build_ID":     "{{ user `CODEBUILD_BUILD_ID` }}",
+        "AWS_Build_Number": "{{ user `CODEBUILD_BUILD_NUMBER` }}",
+        "Retention_Status": "Unverified"
+      },
+      "ssh_username": "ec2-user",
+      "ssh_interface": "private_ip"
+    }
+  ],
+  "provisioners": [
+    {
+      "type": "shell",
+      "script": "src/installationScripts/Ansible/agent-install.sh"
+    },
+    {
+      "type": "shell",
+      "script": "src/configurationScripts/Utilities/install-utilities.sh"
+    },
+    {
+      "type": "file",
+      "source": "src/configurationScripts/HostnameConfiguration/update-hostname.service",
+      "destination": "/tmp/update-hostname.service"
+    },
+    {
+      "type": "file",
+      "source": "src/configurationScripts/HostnameConfiguration/update-hostname.sh",
+      "destination": "/tmp/update-hostname.sh"
+    },
+    {
+      "type": "shell",
+      "script": "src/configurationScripts/HostnameConfiguration/setup.sh"
+    },
+    {
+      "type": "file",
+      "source": "src/installationScripts/CloudWatchAgent/amazon-cloudwatch-agent.json",
+      "destination": "/tmp/amazon-cloudwatch-agent.json"
+    },
+    {
+      "type": "shell",
+      "script": "src/installationScripts/CloudWatchAgent/agent-install.sh"
+    },
+    {
+      "type": "shell",
+      "script": "src/installationScripts/AWSCli/cli-install.sh"
+    },
+    {
+      "type": "shell",
+      "script": "src/installationScripts/SystemsManagerAgent/agent-install.sh",
+      "environment_vars": [
+        "user={{ user `username` }}",
+        "password={{ user `pass` }}",
+        "AWS_DEFAULT_REGION={{ user `aws_region` }}"
+      ]
+    },
+    {
+      "type": "file",
+      "source": "src/installationScripts/Okta/sftd.service",
+      "destination": "/tmp/sftd.service"
+    },
+    {
+      "type": "shell",
+      "script": "src/installationScripts/Okta/agent-install.sh",
+      "environment_vars": [
+        "user={{ user `username` }}",
+        "password={{ user `pass` }}",
+        "AWS_DEFAULT_REGION={{ user `aws_region` }}"
+      ]
+    },
+    {
+      "type": "shell",
+      "script": "src/installationScripts/Rapid7/agent-install.sh",
+      "environment_vars": [
+        "user={{ user `username` }}",
+        "password={{ user `pass` }}",
+        "token={{ user `tokenized` }}",
+        "AWS_DEFAULT_REGION={{ user `aws_region` }}"
+      ]
+    },
+    {
+      "type": "shell",
+      "script": "src/installationScripts/CrowdStrike/agent-install.sh",
+      "environment_vars": [
+        "user={{ user `username` }}",
+        "password={{ user `pass` }}",
+        "crowdstrike_id={{ user `crowdstrike` }}",
+        "AWS_DEFAULT_REGION={{ user `aws_region` }}"
+      ]
+    },
+    {
+      "type": "shell",
+      "script": "src/installationScripts/Splunk/agent-install.sh",
+      "environment_vars": [
+        "user={{ user `username` }}",
+        "password={{ user `pass` }}",
+        "AWS_DEFAULT_REGION={{ user `aws_region` }}"
+      ]
+    },
+    {
+      "type": "file",
+      "source": "src/configurationScripts/OSHardening/hardening.service",
+      "destination": "/tmp/hardening.service"
+    },
+    {
+      "type": "file",
+      "source": "src/configurationScripts/OSHardening/motd",
+      "destination": "/tmp/motd"
+    },
+    {
+      "type": "file",
+      "source": "src/configurationScripts/OSHardening/tec-security-ami-amzn2-hardening.sh",
+      "destination": "/tmp/tec-security-ami-amzn2-hardening.sh"
+    },
+    {
+      "type": "shell",
+      "script": "src/configurationScripts/OSHardening/configure-hardening-scripts.sh"
+    },
+    {
+      "type": "file",
+      "source": "test/autodocs/verification-test-TOOL.sh",
+      "destination": "/tmp/verification-test-tool.sh"
+    },
+    {
+      "type": "file",
+      "source": "test/autodocs/verification-test-OS.sh",
+      "destination": "/tmp/verification-test-osconfig.sh"
+    },
+    {
+      "type": "shell",
+      "script": "test/autodocs/setup.sh"
+    }
+  ],
+  "post-processors": [
+    {
+      "type": "manifest",
+      "output": "manifest.json",
+      "strip_path": true
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+{
+    "okta_endpoint" : "https://takeda.okta.com/oauth2/aus85ru470EFx5vNx357/v1/token?grant_type=client_credentials&scope=autodoc:write",
+    "autodocs_endpoint" : "https://eliqpi0m13.execute-api.us-east-1.amazonaws.com/prd/IQOQ/ami"
+}

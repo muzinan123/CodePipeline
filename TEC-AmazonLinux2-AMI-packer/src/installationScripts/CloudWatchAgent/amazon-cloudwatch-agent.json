@@ -1,0 +1,45 @@
+
+{
+  "metrics": {
+    "metrics_collected": {
+      "mem": {
+        "measurement": [
+          "mem_used_percent",
+          "mem_available",
+          "mem_available_percent",
+          "mem_buffered",
+          "mem_cached",
+          "mem_free",
+          "mem_inactive",
+          "mem_total",
+          "mem_used"
+        ]
+      },
+      "disk": {
+        "resources": [
+          "*"
+        ],
+        "measurement": [
+          "free",
+          "total",
+          "used"
+        ],
+        "ignore_file_system_types": [
+          "sysfs", "devtmpfs","Squashfs","tmpfs"
+        ]
+      },
+      "swap": {
+        "measurement": [
+          "swap_used_percent"
+        ]
+      }
+    },
+    "append_dimensions": {
+      "ImageId": "${aws:ImageId}",
+      "InstanceId": "${aws:InstanceId}",
+      "InstanceType": "${aws:InstanceType}",
+      "AutoScalingGroupName": "${aws:AutoScalingGroupName}"
+    }
+  }
+}
+      

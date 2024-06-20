@@ -1,0 +1,16 @@
+[Unit]
+Description=Run hardening script at startup
+After=network.target
+After=systemd-user-sessions.service
+After=network-online.target
+
+[Timer]
+OnBootSec=10mins
+
+[Service]
+Type=simple
+ExecStart=/tmp/disabled_se.sh
+TimeoutStartSec=0
+
+[Install]
+WantedBy=default.target

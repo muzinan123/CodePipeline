@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites disabled="0" errors="0" failures="1" name="win2016-us-east-1" tests="2" time="6">
+    <testsuite disabled="0" errors="0" failures="1" name="win2016-us-east-1" skipped="0" tests="5" time="6">
+        <!-- TESTCASESTART -->
+        <testcase classname="AmazonSSMAgent" name="Amazon SSM Agent" status="success" time="1" />
+        <testcase classname="DummyAgent" name="DummyService" status="failed" time="3">
+            <failure message="Cannot find any service" type="ServiceNotFound"/>
+        </testcase>
+        <!-- TESTCASESTOP -->
+    </testsuite>
+</testsuites>

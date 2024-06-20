@@ -1,0 +1,289 @@
+# Purpose: Execute automated Operational Readiness Tests to validate the AMI has been built to specification
+
+version: 0.2
+
+env:
+  shell: bash
+  variables: 
+    ProvisionedStatus: "NOTSTARTED"
+    AsssociatedStatus: "NOTSTARTED"
+    AmiRegion: "us-east-1"
+    OperatingSystem: "AMZN2"
+    #artifact_list: "ami_artifacts.json"
+    snsTopic: arn:aws:sns:us-east-1:875633494741:AMI-Pipeline-TEC-AmazonLinux2-packer-testec2alertsnstopic-ES1KVHSZVEIO
+    snsMessage: "message.txt"
+    orcBaseDirectory: "test/orc"
+    autodocsBaseDirectory: "test/autodocs"
+    #Environment: "Development" # To be defined from CodePipeline
+
+phases:
+  install: 
+    runtime-versions: 
+      python: 3.8 
+    commands:
+      # Printing versions used for Compliance
+      - echo 'Printing versions of software used for compliance...'
+      - bashVersion=$(bash --version)
+      - | 
+          echo "Bash Version: $bashVersion"
+      - pythonVesion=$(python3 --version)
+      - |
+          echo "Python Version: $pythonVesion"
+      - awsVersion=$(/usr/local/bin/aws --version)
+      - |
+          echo "AWS CLI Version: $awsVersion"
+  pre_build:
+    commands:
+      - echo "Setting path for Artifact ..."
+      - ArtifactVariable="\$CODEBUILD_SRC_DIR_${ArtifactName}"
+      - artifactPath=$(eval "echo $ArtifactVariable")
+      - echo $artifactPath
+      - ls -l $artifactPath
+
+      # Prepare Reports directory & artifacts
+      - mkdir -p ${autodocsBaseDirectory}/reports
+      - export toolTestReport=${autodocsBaseDirectory}/reports/TestReportTOOL_${OperatingSystem}_${AmiRegion}.xml
+      -
+      - touch toolTestReport
+      - export osTestReport=${autodocsBaseDirectory}/reports/TestReportOS_${OperatingSystem}_${AmiRegion}.xml
+      # Computed environment variables
+      # TODO: Consider moving to the manifest.json
+      - | 
+          if [[ "$Environment" == "Development" ]]
+          then
+            artifact_list="ami_artifacts.json"
+          elif [[ "$Environment" == "Test" ]]
+          then
+            artifact_list="ami_artifacts_tst.json"
+          else
+            echo "Incorrect parameter Environment"
+            exit 1
+          fi
+      - export AmiId=`cat ${artifactPath}/${artifact_list} | jq --arg AmiRegion "$AmiRegion" -r '.AMIDetails | .[$AmiRegion]'`
+      - export identifier=${CODEBUILD_RESOLVED_SOURCE_VERSION:0:3}
+
+  build:
+    commands:
+      - echo "Provisioning an $OperatingSystem instance using $AmiId..."
+
+      # Create EC2 instance from AMI to test
+      # Note: If you receive access denied error when trying to assume the role OrganizationAccountAccessRole, disable the Constraint of the Service Catalog product manually within Deployment account
+      # Adding random to generate non conflicting provisioned product when multiple codebuild instance is from this spec
+      - export RANDOM=$$
+      - export pprandomid=$RANDOM
+      - |
+          export ProvisionedProductId=$(/usr/local/bin/aws servicecatalog provision-product \
+            --product-id prod-2j6y6bgn4x6pu \
+            --provisioned-product-name "GoldenAMI-$OperatingSystem-TEST-$CODEBUILD_RESOLVED_SOURCE_VERSION-$pprandomid" \
+            --provisioning-parameters Key=VpcId,Value=$BUILD_VPC_ID Key=Subnet,Value=$BUILD_SUBNET_ID Key=OperatingSystem,Value=$OperatingSystem Key=ImageID,Value=$AmiId Key=Identifier,Value=$identifier Key=Environment,Value=$Environment\
+            --provisioning-artifact-id 'pa-mmpep63eg6fhk' --provision-token $CODEBUILD_RESOLVED_SOURCE_VERSION \
+            | jq -r '.RecordDetail | .ProvisionedProductId')
+
+      # Get status of EC2 instance
+      - export ProvisionedStatus='INITIALIZING'
+      - echo "$ProvisionedProductId is $ProvisionedStatus"
+      - |
+          while [[ $ProvisionedStatus != "AVAILABLE" ]]; do
+            if [[ $ProvisionedStatus == "ERROR" ]]; then
+              echo "$ProvisionedProductId is in an errored state..."
+              ProvisionedStatus=$(/usr/local/bin/aws servicecatalog describe-provisioned-product --id $ProvisionedProductId --query ProvisionedProductDetail.StatusMessage --output text)
+              exitStatus=1
+              break
+            else
+              echo "Retrying in 10 seconds..."
+              sleep 10
+              export ProvisionedStatus=$(/usr/local/bin/aws servicecatalog describe-provisioned-product --id $ProvisionedProductId --query ProvisionedProductDetail.Status --output text)
+            fi
+            echo "$ProvisionedProductId is $ProvisionedStatus..."
+          done
+      - | 
+          if [[ $exitStatus == 1 ]]; then
+            echo $ProvisionedStatus
+            /usr/local/bin/aws servicecatalog describe-provisioned-product --id $ProvisionedProductId
+            exit 1
+          else
+            echo "$ProvisionedProductId is $ProvisionedStatus"
+          fi
+
+      # Set environment variable for instance ID
+      - |
+          export instance_id=$(/usr/local/bin/aws servicecatalog get-provisioned-product-outputs \
+            --provisioned-product-name "GoldenAMI-$OperatingSystem-TEST-$CODEBUILD_RESOLVED_SOURCE_VERSION-$pprandomid" \
+            --output-keys InstanceID | jq -r '.Outputs | .[] | .OutputValue')
+      
+      # Adding tags for Golden AMI pipeline
+      - aws ec2 create-tags --resources ${instance_id} --tags Key=ami-pipeline-instance,Value=true
+
+      # Wait for EC2 instance to be ready
+      - echo "Waiting until instance, $instance_id, is running..."
+      - aws ec2 wait instance-running --instance-ids ${instance_id}
+      - echo "Waiting until instance, $instance_id, passes system status checks..."
+      - aws ec2 wait system-status-ok --instance-ids ${instance_id}
+      - echo "Waiting until instance, $instance_id, passes instance status checks..."
+      - aws ec2 wait instance-status-ok --instance-ids ${instance_id}
+      - aws ec2 describe-instances --instance-ids ${instance_id}
+
+      # Checking SSM association status
+      - echo "Checking to see if instance, $instance_id, is associated with SSM..."
+      - export SessionManagerConnectionStatus='Pending'
+      - export chkThreshhold=0
+      - |
+          while [[ $SessionManagerConnectionStatus != 'connected' ]]; do
+            echo "$instance_id is not associated with SSM..."
+            echo "Retrying in 30 seconds..."
+            
+            (( chkThreshhold++ ))
+            sleep 30
+            
+            export SessionManagerConnectionStatus=`echo $(aws ssm get-connection-status --target ${instance_id} --query Status --output text)`
+            
+            if [[ $chkThreshhold -eq 20 ]] ; then
+              SessionManagerConnectionStatus="Timed Out"
+
+              echo "Attempted $chkThreshhold times to associate $instance_id with SSM..."
+              echo "Association status: $SessionManagerConnectionStatus"
+              echo "Verification Terminated. No report generated. "
+              exit 124
+            fi
+          done
+      - echo "Instance, $instance_id, is associated with SSM.."
+
+      # Begin testing of the EC2 instance
+      - echo "Beginning automated test for $OperatingSystem..."
+      - echo "Executing OS and tool verification tests..."
+      
+      # verification-test-TOOL.sh
+      # Get the tool status (installed, configured, running, etc.)
+      - export tool_verification_command=`aws ssm send-command --document-name "AWS-RunShellScript" --instance-ids ${instance_id} --parameters '{"commands":["/opt/amiTestSuite/verification-test-tool.sh"]}' --comment "$OperatingSystem Verification Test - TOOL Configuration/Status" --cloud-watch-output-config '{"CloudWatchOutputEnabled":true}' --query "Command.CommandId" --output text`
+      - echo "Command ID ${tool_verification_command} has been executed on $instance_id..."
+      - | 
+          aws ssm wait command-executed --command-id ${tool_verification_command} --instance-id ${instance_id} | :
+
+      # Get the version of the tool
+      - export tool_version_command=`aws ssm send-command --document-name "AWS-RunShellScript" --instance-ids ${instance_id} --parameters '{"commands":["cat serviceVersion-TOOL.txt"]}' --comment "$OperatingSystem Verification Test - TOOL Versions" --cloud-watch-output-config '{"CloudWatchOutputEnabled":true}' --query "Command.CommandId" --output text`
+      - echo "Command ID ${tool_version_command} has been executed on $instance_id..."
+      - aws ssm list-command-invocations --command-id "${tool_version_command}" --details --query "CommandInvocations[].CommandPlugins[].Output" --output text
+
+      #verification-test-OS.sh
+      # Confirm OS level configurations are implemented
+      - export os_verification_command=`aws ssm send-command --document-name "AWS-RunShellScript" --instance-ids ${instance_id} --parameters '{"commands":["/opt/amiTestSuite/verification-test-osconfig.sh"]}' --comment "$OperatingSystem Verification Test-OS" --cloud-watch-output-config '{"CloudWatchOutputEnabled":true}' --query "Command.CommandId" --output text`
+      - echo "Command ID ${os_verification_command} has been executed on $instance_id..."
+      - | 
+          aws ssm wait command-executed --command-id ${os_verification_command} --instance-id ${instance_id} | :
+
+      # Generate Reports
+      - aws ssm list-command-invocations --command-id "$tool_verification_command" --details --query "CommandInvocations[].CommandPlugins[].Output" --output text
+      - aws ssm list-command-invocations --command-id "$tool_verification_command" --details --query "CommandInvocations[].CommandPlugins[].Output" --output text | grep PASS > ${autodocsBaseDirectory}/reports/reportTOOLstatus.tmp
+      - aws ssm list-command-invocations --command-id "$tool_version_command" --details --query "CommandInvocations[].CommandPlugins[].Output" --output text > ${autodocsBaseDirectory}/reports/reportTOOLversion.tmp
+      - chmod -R 755 ${autodocsBaseDirectory}/generate_test_reportTOOL.sh
+      - ${autodocsBaseDirectory}/generate_test_reportTOOL.sh ${OperatingSystem} ${AmiRegion} ${toolTestReport} ${autodocsBaseDirectory}
+
+      - aws ssm list-command-invocations --command-id "$os_verification_command" --details --query "CommandInvocations[].CommandPlugins[].Output" --output text
+      - aws ssm list-command-invocations --command-id "$os_verification_command" --details --query "CommandInvocations[].CommandPlugins[].Output" --output text | grep PASS > ${autodocsBaseDirectory}/reports/reportOSstatus.tmp
+      - chmod -R 755 ${autodocsBaseDirectory}/generate_test_reportOS.sh
+      - ${autodocsBaseDirectory}/generate_test_reportOS.sh ${OperatingSystem} ${AmiRegion} ${osTestReport} ${autodocsBaseDirectory}
+      
+      - export toolResults=`grep failed $toolTestReport | wc -l`
+      - |
+          echo "Failed test cases: $toolResults"
+          echo "${toolTestReport}"
+      - export osResults=`grep failed $osTestReport | wc -l`
+      - |
+          echo "Failed test cases: $osResults"
+          echo "${osTestReport}"
+
+
+      # Terminating project in case of failure
+      - | 
+          if [[ ${toolResults} > 0 ]] || [[ ${osResults} > 0 ]]; then 
+            echo "Build failed ..."
+            exit 1
+          else 
+            echo 'AMI passed all tests'
+          fi
+  post_build:
+    commands:
+      # Delete the AMI if it failed any automated tests or failed the build stage - -- Disabled deregister-image steps to allow re-run of verify Build jobs without change
+      - | 
+          if [[ ${CODEBUILD_BUILD_SUCCEEDING} = 0 ]] || [[ ${toolResults} > 0 ]] || [[ ${osResults} > 0 ]]; then 
+            if [[ $BranchName == 'master' ]]; then
+              echo "AMI failed ${toolResults} + ${osResults} test case(s)..."
+              echo "Deleting $AmiId..."
+              aws ec2 deregister-image --image-id $AmiId
+              echo "$AmiId deleted!"
+            fi
+            echo "Failing stage..."
+          else 
+            echo 'AMI passed all tests'
+          fi
+
+      # Deprovision instance used for testing
+      - |
+          if [[ ! -z $ProvisionedProductId ]]; then
+            echo "Deleting Service Catalog product used to test the AMI..."
+            aws servicecatalog terminate-provisioned-product --provisioned-product-name "GoldenAMI-$OperatingSystem-TEST-$CODEBUILD_RESOLVED_SOURCE_VERSION-$pprandomid"  | :
+          else
+            echo "A Service Catalog product was not provisioned!"
+          fi
+
+      # Send notification of report
+      - export snsAlertSubject="[${OperatingSystem}] Smoke Test Summary"
+      - echo "================================================================================================" > ${snsMessage}
+      - echo ${snsAlertSubject} >> ${snsMessage}
+      - echo "Region - ${AmiRegion}" >> ${snsMessage}
+      - echo "AMI ID - ${AmiId}" >> ${snsMessage}
+      - cat ${toolTestReport} >> ${snsMessage}
+      - cat ${osTestReport} >> ${snsMessage} 
+      - echo "================================================================================================" >> ${snsMessage}
+      - cat ${snsMessage}
+      - aws sns publish --topic-arn ${snsTopic} --message file://${snsMessage} --subject "${snsAlertSubject}" 
+
+      # Modify AMI tags post-testing
+      - | 
+          if [[ $BranchName == 'master' ]]; then
+            if [[ ${toolResults} = 0 ]] || [[ ${osResults} = 0 ]]; then 
+              echo "Updating Retention_Status to Verified"
+              aws ec2 create-tags --resources $AmiId --tags Key=Retention_Status,Value=Verified
+            else
+              echo "Updating Retention_Status to Failed"
+              aws ec2 create-tags --resources $AmiId --tags Key=Retention_Status,Value=Failed
+            fi
+          else
+            echo "This is not the master branch..."
+            echo "Branch name: $BranchName"
+            echo "Updating Retention_Status to Sandbox"
+            aws ec2 create-tags --resources $AmiId --tags Key=Retention_Status,Value=Sandbox
+          fi  
+      - | 
+          if [[ ${toolResults} = 0 ]] || [[ ${osResults} = 0 ]]; then 
+            echo "The tests were successfully executed"
+          else
+            echo "AMI failed TOOLtests:${toolResults}, and OS-config tests:${osResults} test case(s)..."
+          fi
+
+reports:
+  Installed-Tools-Report:
+    files:
+      - 'TestReportTOOL_${OperatingSystem}_${AmiRegion}.xml'
+    discard-paths: yes
+    file-format: JunitXml
+    base-directory: '${autodocsBaseDirectory}/reports'
+  OS-Config-Report:
+    files:
+      - 'TestReportOS_${OperatingSystem}_${AmiRegion}.xml'
+    discard-paths: yes
+    file-format: JunitXml
+    base-directory: '${autodocsBaseDirectory}/reports'
+artifacts:
+  files:
+    - reportOSstatus.tmp
+    - reportTOOLstatus.tmp
+    - reportTOOLversion.tmp
+  discard-paths: yes
+  base-directory: '${autodocsBaseDirectory}/reports'
+  secondary-artifacts:
+    operational_readiness_test_results:
+      files:
+        - '**/*'
+      discard-paths: yes
+      base-directory: '${autodocsBaseDirectory}/reports'

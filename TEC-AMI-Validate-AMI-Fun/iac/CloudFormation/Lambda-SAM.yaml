@@ -1,0 +1,89 @@
+Transform: 'AWS::Serverless-2016-10-31'
+Description: Deploy Serverless Application (SAM)
+
+Parameters:
+  pProduct:
+    Type: String
+  pEnvironment: 
+    Type: String
+    AllowedValues:
+      - Development
+      - Test
+      - Production
+  ### Layer Versions ###
+  pBoto3LayerLatest:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/layers/boto3/latest'
+  pCommonLayerLatest:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/layers/common/latest'
+
+Conditions: 
+  isDevelopmentRequired: !Or [!Equals [!Ref pEnvironment, 'Development'], !Equals [!Ref pEnvironment, 'Production']]
+  isTestRequired: !Equals [!Ref pEnvironment, 'Test']
+  isProductionRequired: !Equals [!Ref pEnvironment, 'Production']
+
+Resources:
+  rLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: main.lambda_handler
+      Runtime: python3.7
+      FunctionName: !Ref pProduct
+      Timeout: 900
+      MemorySize: 1024
+      Layers:
+        - !Ref pBoto3LayerLatest
+        - !Ref pCommonLayerLatest
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/PipelineFactory-Lambda-Action'
+      CodeUri: ../../src
+      Environment: 
+        Variables: 
+          Role: CodePipeline-Action
+          DEV_ACCOUNT: '{{resolve:ssm:/accounts/dev/id:1}}'
+          TST_ACCOUNT: '{{resolve:ssm:/accounts/test/id:1}}'
+      Tags:
+        GoldenAmiPipelineComponent: 'true'
+        apms-id: "ECS-CPE-Infrastructure"
+        business-unit-n1: "CTO"
+        business-unit-n2: "CTO-ECS-Tech"
+        it-business-owner: "ryan.pehrson@takeda.com"
+        it-technical-owner: "thomas.christopoulos@takeda.com"
+        environment-id: !Ref pEnvironment
+  
+  rGoldenAmiPipelineTaggingDevAccountPermission: 
+    Type: AWS::Lambda::Permission
+    Condition: isDevelopmentRequired
+    Properties: 
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt rLambdaFunction.Arn  
+      Principal: 'arn:aws:iam::{{resolve:ssm:/accounts/dev/id:1}}:root'
+
+  rGoldenAmiPipelineTaggingTestAccountPermission: 
+    Type: AWS::Lambda::Permission
+    Condition: isTestRequired
+    Properties: 
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt rLambdaFunction.Arn  
+      Principal: 'arn:aws:iam::{{resolve:ssm:/accounts/test/id:1}}:root'
+
+  rGoldenAmiPipelineTaggingProdAccountPermission:
+    Type: AWS::Lambda::Permission
+    Condition: isProductionRequired
+    Properties: 
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt rLambdaFunction.Arn  
+      Principal: 'arn:aws:iam::{{resolve:ssm:/accounts/prod/id:1}}:root'
+
+  rGoldenAmiPipelineTaggingDeplAccountPermission: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt rLambdaFunction.Arn  
+      Principal: 'arn:aws:iam::{{resolve:ssm:/accounts/depl/id:1}}:root'
+
+  rLambdaFunctionLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${pProduct}"
+      RetentionInDays: 7

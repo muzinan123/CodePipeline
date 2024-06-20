@@ -1,0 +1,458 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Builds a sandbox CI/CD Pipeline to create a Golden AMI for AMZN2.
+
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: AMI Configuration
+        Parameters:
+          - OperatingSystem
+      - Label:
+          default: CodeBuild - Network Configuration
+        Parameters:
+          - BuilderVPC
+          - BuilderPublicSubnet
+    ParameterLabels:
+      OperatingSystem:
+        default: Operating System
+      BuilderVPC:
+        default: VPC ID
+      BuilderPublicSubnet:
+        default: Subnet ID
+
+Parameters:
+  pSharedProdAccountNumber:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/accounts/SharedServices/Prod/id'
+  pRegion1Name:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/pipelinefactory/codepipeline/region1/name'
+  pCodePipelineActionFoundationalRole:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/pipelinefactory/codepipeline/iam/action/foundational'
+  pCodePipelineServiceFoundationalRole:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/pipelinefactory/codepipeline/iam/service/foundational'
+  OperatingSystem:
+    Type: String
+    Default: AMZN2
+    Description: 'Name of the repository, used for naming the Pipeline'
+  BuilderVPC:
+    Type: 'AWS::EC2::VPC::Id'
+    Description: VPC ID for CodeBuild
+  BuilderPublicSubnet:
+    Type: 'AWS::EC2::Subnet::Id'
+    Description: Public Subnet ID for CodeBuild
+  BranchName: 
+    Type: String
+    Description: The branch to deploy within CodePipeline
+    Default: hostname
+
+Resources:
+  # -------------------------------------------
+  # Security Group for CodeStar activities
+  # -------------------------------------------
+  PackerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupDescription: !Sub A security group for Packer to build the ${OperatingSystem} Golden AMI
+      GroupName: !Sub TEC-SSV-Sandbox-${OperatingSystem}-USVGA-PACKER
+      SecurityGroupIngress: 
+        - Description: Inbound SSH traffic from VPC to allow Packer to connect
+          CidrIp: 10.216.222.0/23
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+      SecurityGroupEgress: 
+        - Description: All outbound traffic for Packer to pull artifacts
+          CidrIp: 0.0.0.0/0
+          FromPort: -1
+          IpProtocol: "-1"
+          ToPort: -1
+      VpcId: !Ref BuilderVPC
+      Tags: 
+        - Key: Name
+          Value: !Sub TEC-SSV-Sandbox-${OperatingSystem}-USVGA-PACKER
+
+  rPackerSecurityGroupParameterStore:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description: Shared Services Name
+      Name: !Sub "/tec/ami-pipeline/${OperatingSystem}sbx/security-group"
+      Type: String
+      Value: !Ref PackerSecurityGroup
+
+  # -------------------------------------------
+  # CodeBuild Projects
+  # -------------------------------------------
+  CreateAMICodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub 'Sandbox-${OperatingSystem}-Create-AMI'
+      Description: !Sub 'This CodeBuild project will be used to create a Golden AMI for ${OperatingSystem}'
+      LogsConfig: 
+        CloudWatchLogs: 
+          GroupName: !Ref CreateAMICodeBuildProjectLogGroup
+          Status: ENABLED
+      ServiceRole: !Ref pCodePipelineActionFoundationalRole
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: iac/CodeBuild/buildspec-createami.yaml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:5.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: BUILD_OUTPUT_BUCKET
+            Value: tec-cpe-shs-codepipeline-463173387112-us-east-1
+          - Name: BUILD_VPC_ID
+            Value: !Ref BuilderVPC
+          - Name: BUILD_SUBNET_ID
+            Value: !Ref BuilderPublicSubnet
+          - Name: CONFIG_FILE
+            Value: src/packer/packer-configuration.json
+      VpcConfig:
+        VpcId: !Ref BuilderVPC
+        Subnets:
+          - !Ref BuilderPublicSubnet
+        SecurityGroupIds:
+          - !Ref PackerSecurityGroup
+      TimeoutInMinutes: 60
+      EncryptionKey: arn:aws:kms:us-east-1:463173387112:key/6bca6283-7a96-43f9-a44d-16800f28bd0f
+
+  CreateAMICodeBuildProjectLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: !Sub '/aws/codebuild/golden-ami/${OperatingSystem}/sandbox/Create-AMI'
+      RetentionInDays: 14
+
+
+  OperationalReadinessTestCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub 'Sandbox-${OperatingSystem}-Operational-Readiness-Test'
+      Description: !Sub 'This CodeBuild project will be used to test a Golden AMI for ${OperatingSystem}'
+      LogsConfig: 
+        CloudWatchLogs: 
+          GroupName: !Ref OperationalReadinessTestCodeBuildProjectLogGroup
+          Status: ENABLED
+      ServiceRole: !Ref pCodePipelineActionFoundationalRole
+      Artifacts:
+        Type: CODEPIPELINE
+      SecondaryArtifacts:
+        - ArtifactIdentifier: operational_readiness_test_results
+          Type: S3
+          Location: tec-cpe-shs-codepipeline-463173387112-us-east-1
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: iac/CodeBuild/buildspec-operationalReadinessTest.yaml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:5.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: BUILD_OUTPUT_BUCKET
+            Value: tec-cpe-shs-codepipeline-463173387112-us-east-1
+          - Name: BUILD_VPC_ID
+            Value: !Ref BuilderVPC
+          - Name: BUILD_SUBNET_ID
+            Value: !Ref BuilderPublicSubnet
+      VpcConfig:
+        VpcId: !Ref BuilderVPC
+        Subnets: 
+          - !Ref BuilderPublicSubnet
+        SecurityGroupIds: 
+          - !Ref PackerSecurityGroup
+      TimeoutInMinutes: 20
+      EncryptionKey: arn:aws:kms:us-east-1:463173387112:key/6bca6283-7a96-43f9-a44d-16800f28bd0f
+
+  OperationalReadinessTestCodeBuildProjectLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: !Sub '/aws/codebuild/golden-ami/sandbox/${OperatingSystem}/Operational-Readiness-Test'
+      RetentionInDays: 14  
+
+  CopyAMICodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub 'Sandbox-${OperatingSystem}-Copy-AMI'
+      Description: !Sub 'This CodeBuild project will be used to copy AMI for ${OperatingSystem} to other regions within account'
+      LogsConfig: 
+        CloudWatchLogs: 
+          GroupName: !Ref CopyAMICodeBuildProjectLogGroup
+          Status: ENABLED
+      ServiceRole: !Ref pCodePipelineActionFoundationalRole
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: iac/CodeBuild/buildspec-copyami.yaml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:5.0
+        PrivilegedMode: true
+      VpcConfig:
+        VpcId: !Ref BuilderVPC
+        Subnets: 
+          - !Ref BuilderPublicSubnet
+        SecurityGroupIds: 
+          - !Ref PackerSecurityGroup
+      TimeoutInMinutes: 20
+      EncryptionKey: arn:aws:kms:us-east-1:463173387112:key/6bca6283-7a96-43f9-a44d-16800f28bd0f
+
+  CopyAMICodeBuildProjectLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: !Sub '/aws/codebuild/golden-ami/${OperatingSystem}/sandbox/Copy-AMI'
+      RetentionInDays: 14
+
+  AutoDocsPreparationProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub 'Sandbox-${OperatingSystem}-AutoDocs-Preparation'
+      Description: !Sub 'This CodeBuild project will be used to generate a report for AutoDocs for ${OperatingSystem}'
+      ServiceRole: !Ref pCodePipelineActionFoundationalRole
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: iac/CodeBuild/buildspec-autodocsPrep.yaml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:5.0
+        PrivilegedMode: true
+      VpcConfig:
+        VpcId: !Ref BuilderVPC
+        Subnets: 
+          - !Ref BuilderPublicSubnet
+        SecurityGroupIds: 
+          - !Ref PackerSecurityGroup
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: !Ref AutoDocsPreparationProjectLogGroup
+          Status: ENABLED
+      TimeoutInMinutes: 10
+      EncryptionKey: arn:aws:kms:us-east-1:463173387112:key/6bca6283-7a96-43f9-a44d-16800f28bd0f
+
+  AutoDocsPreparationProjectLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: !Sub '/aws/codebuild/golden-ami/${OperatingSystem}/sandbox/AutoDocs-Preparation'
+      RetentionInDays: 14  
+
+  AutoDocsVerificationProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub 'Sandbox-${OperatingSystem}-AutoDocs-Verification'
+      Description: !Sub 'This CodeBuild project validates the AMI for ${OperatingSystem} via AutoDocs'
+      ServiceRole: !Ref pCodePipelineActionFoundationalRole
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: iac/CodeBuild/buildspec-autodocsValidation.yaml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:5.0
+        PrivilegedMode: true
+      VpcConfig:
+        VpcId: !Ref BuilderVPC
+        Subnets: 
+          - !Ref BuilderPublicSubnet
+        SecurityGroupIds: 
+          - !Ref PackerSecurityGroup
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: !Ref AutoDocsVerificationProjectLogGroup
+          Status: ENABLED
+      TimeoutInMinutes: 10
+      EncryptionKey: arn:aws:kms:us-east-1:463173387112:key/6bca6283-7a96-43f9-a44d-16800f28bd0f
+
+  AutoDocsVerificationProjectLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: !Sub '/aws/codebuild/golden-ami/${OperatingSystem}/sandbox/AutoDocs-Verification'
+      RetentionInDays: 14  
+      # KmsKeyId: arn:aws:kms:us-east-1:463173387112:key/6bca6283-7a96-43f9-a44d-16800f28bd0f
+
+  # -------------------------------------------
+  # CodePipeline
+  # -------------------------------------------
+  GoldenAmiPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RestartExecutionOnUpdate: true
+      ArtifactStores:
+        - Region: !Ref pRegion1Name
+          ArtifactStore:
+            EncryptionKey:
+              Id: arn:aws:kms:us-east-1:463173387112:key/6bca6283-7a96-43f9-a44d-16800f28bd0f
+              Type: KMS
+            Location: tec-cpe-shs-codepipeline-463173387112-us-east-1
+            Type: S3
+      Name: !Sub '${OperatingSystem}-Golden-AMI-Sandbox-Pipeline'
+      RoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/${pCodePipelineServiceFoundationalRole}
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: CodeCommitCloneRef
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: '1'
+              Configuration:
+                RepositoryName: TEC-AmazonLinux2-AMI-packer
+                # Modify the branch name below to test features on a new branch (i.e. feature/123456)
+                BranchName: !Ref BranchName
+                PollForSourceChanges: false
+                OutputArtifactFormat: CODEBUILD_CLONE_REF
+              Namespace: GitVariables
+              OutputArtifacts:
+                - Name: CloneRefSource
+              RunOrder: 1
+              RoleArn: arn:aws:iam::875633494741:role/CodePipeline-Action-Foundational
+            - Name: CodeCommitCodeZip
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: '1'
+              Configuration:
+                RepositoryName: TEC-AmazonLinux2-AMI-packer
+                # Modify the branch name below to test features on a new branch (i.e. feature/123456)
+                BranchName: !Ref BranchName
+                PollForSourceChanges: false
+              OutputArtifacts:
+                - Name: CodeZipSource
+              RunOrder: 1
+              RoleArn: arn:aws:iam::875633494741:role/CodePipeline-Action-Foundational
+ 
+        # Do not remove/change the name of this Stage - mandatory for 'self-awareness' where Lambda function updates CodePipeline
+        - Name: BuildAndPackage
+          Actions:
+            # Do not remove/change the name (mandatory)
+            - Name: Update-CodePipeline 
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: "1"
+              Configuration:
+                FunctionName: ScanUpdateCodePipeline
+                UserParameters: |
+                  {
+                    "cfn_template": "iac/CloudFormation/CodePipeline-Sandbox.yaml",
+                    "cfn_parameter": ""
+                  }
+              InputArtifacts:
+                - Name: CodeZipSource
+              RoleArn: !Sub arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action
+              RunOrder: 1
+
+            # Build the AMI leveraging Packer
+            - Name: Build-AMI
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CreateAMICodeBuildProject
+                EnvironmentVariables: '[{"name":"BranchName","value":"#{GitVariables.BranchName}","type":"PLAINTEXT"}]'
+              InputArtifacts:
+                - Name: CloneRefSource
+              OutputArtifacts:
+                - Name: BuildAMIDev
+              RunOrder: 2
+            # Test the OS configuration and the installed tools 
+            - Name: Test-AMI
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref OperationalReadinessTestCodeBuildProject
+                EnvironmentVariables: '[{"name":"BranchName","value":"#{GitVariables.BranchName}","type":"PLAINTEXT"}, {"name":"ArtifactName","value":"BuildAMIDev","type":"PLAINTEXT"}, {"name":"Environment","value":"Development","type":"PLAINTEXT"}]'
+                PrimarySource: CloneRefSource
+              InputArtifacts:
+                - Name: CloneRefSource
+                - Name: BuildAMIDev
+              OutputArtifacts:
+                - Name: TestAMIDev
+              RunOrder: 3
+            # Copy and Encrypt the AMI to each region
+            - Name: Copy-AMI-To-Regions
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CopyAMICodeBuildProject
+                EnvironmentVariables: '[{"name":"ArtifactName","value":"BuildAMIDev","type":"PLAINTEXT"}]'
+                PrimarySource: CloneRefSource
+              InputArtifacts:
+                - Name: CloneRefSource
+                - Name: BuildAMIDev
+              OutputArtifacts:
+                - Name: DevAMI
+              RunOrder: 4
+            # Validate the AMI exists and is encrypted
+            - Name: AMI-Verification
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: TEC-AMI-Validate-AMI-Fun
+                UserParameters: "{\"AccountType\":\"DEV\"}"
+              InputArtifacts:
+                - Name: DevAMI
+              RoleArn: !Sub 'arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action'
+              RunOrder: 5
+            # Generate payload for AutoDocs
+            - Name: AutoDocs-Preparation
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref AutoDocsPreparationProject
+                EnvironmentVariables: '[{"name":"BranchName","value":"#{GitVariables.BranchName}","type":"PLAINTEXT"}, {"name":"orcArtifactName","value":"TestAMIDev","type":"PLAINTEXT"}, {"name":"amiArtifactName","value":"DevAMI","type":"PLAINTEXT"}, {"name":"Environment","value":"Development","type":"PLAINTEXT"}]'
+                PrimarySource: CloneRefSource
+              InputArtifacts:
+                - Name: CloneRefSource
+                - Name: TestAMIDev
+                - Name: DevAMI
+              OutputArtifacts:
+                - Name: AutoDocsPreparationDev
+              RunOrder: 5
+            # Send payload to AutoDocs
+            - Name: AutoDocs-Verification
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref AutoDocsVerificationProject
+                EnvironmentVariables: '[{"name":"BranchName","value":"#{GitVariables.BranchName}","type":"PLAINTEXT"}, {"name":"AutoDocArtifactName","value":"AutoDocsPreparationDev","type":"PLAINTEXT"}, {"name":"Environment","value":"Development","type":"PLAINTEXT"}]'
+                PrimarySource: CloneRefSource
+              InputArtifacts:
+                - Name: CloneRefSource
+                - Name: AutoDocsPreparationDev
+              OutputArtifacts:
+                - Name: AutoDocsVerificationDev
+              RunOrder: 6

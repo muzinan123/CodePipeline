@@ -1,0 +1,136 @@
+# Purpose: Create the custom AMI per Takeda standards
+
+version: 0.2
+
+env:
+  shell: bash
+  variables: 
+    autodocsBaseDirectory: "test/autodocs"
+    AmiRegion: "us-east-1"
+    OperatingSystem: "AMZN2"
+
+phases:
+  pre_build:
+    commands:
+      # Install Ansible
+      - echo "Installing Ansible..."
+      - pip install ansible==3.2.0
+      - pip install ansible-lint==4.2.0
+
+      # Configure Ansible
+      # - echo "Configuring Ansible to log output..."
+      # - mv src/configurationScripts/OSHardening/ansible/ansible.cfg .
+
+      # Install Packer version 1.6.2
+      - echo "Installing Packer..."
+      - curl -o packer.zip https://releases.hashicorp.com/packer/1.6.2/packer_1.6.2_linux_amd64.zip && unzip packer.zip
+
+      # Execute validation tests
+      - mkdir -p ${autodocsBaseDirectory}/reports
+      - export buildTestReport=${autodocsBaseDirectory}/reports/TestReportBuild_${OperatingSystem}_${AmiRegion}.xml
+      - ${autodocsBaseDirectory}/verification-test-build-tools.sh
+      - cat serviceStatus-Build.txt | grep PASS > ${autodocsBaseDirectory}/reports/reportBuildstatus.tmp
+      - ${autodocsBaseDirectory}/generate_test_reportBuild.sh ${OperatingSystem} ${AmiRegion} ${buildTestReport} ${autodocsBaseDirectory}
+
+      # Ansible validation checks
+      - echo "Validating Ansible playbooks..."
+      # - ansible-lint src/configurationScripts/OSHardening/ansible/RHEL8-CIS_Benchmark_L1.yml -x 303,305,306
+
+      # Printing versions used for compliance
+      - echo 'Printing versions of software used for compliance...'
+      - bashVersion=$(bash --version)
+      - | 
+          echo "Bash Version: $bashVersion"
+      - packerVersion=$(./packer --version)
+      - |
+          echo "Packer Version: $packerVersion"
+      - ansibleVersion=$(ansible --version)
+      - | 
+          echo "Ansible version: $ansibleVersion"
+
+      - ansiblePlaybookVersion=$(ansible-playbook --version)
+      - | 
+          echo "Ansible Playbook version: $ansiblePlaybookVersion"
+  build:
+    commands:
+      # Book keeping activities
+      - | 
+          echo "Commit ID: $CODEBUILD_RESOLVED_SOURCE_VERSION"
+      - | 
+          echo "CodeBuild ID: $CODEBUILD_BUILD_ID"
+      - |
+          echo "CodeBuild Build Number: $CODEBUILD_BUILD_NUMBER"
+
+      # Packer
+      - echo 'Beginning AMI build...'
+      - ./packer build -var CODEBUILD_RESOLVED_SOURCE_VERSION=$CODEBUILD_RESOLVED_SOURCE_VERSION -var CODEBUILD_BUILD_ID=$CODEBUILD_BUILD_ID -var CODEBUILD_BUILD_NUMBER=$CODEBUILD_BUILD_NUMBER -color=false $CONFIG_FILE | tee build.log
+  post_build:
+    commands:
+      # Packer build validation & data gathering (i.e. changelog + AMI IDs)
+      - | 
+          if [ ${CODEBUILD_BUILD_SUCCEEDING} = 0 ]; then 
+            echo "Failing stage..."
+            echo 'Please validate the Packer build'
+            exit 1
+          else 
+            if [ - CHANGELOG.md ]; then
+              echo "Capturing CHANGELOG entry..."
+              changeMessage=$(cat CHANGELOG.md | grep '>' | head -1 | cut -d '>' -f 2)
+              echo $changeMessage
+
+              placeholder=$(jq '.Description' src/packer/ami_artifacts.json | cut -d '"' -f 2)
+              sed -i -e "s/$placeholder/$changeMessage/g" src/packer/ami_artifacts.json
+            else
+              echo 'manifest.json not created...'
+            fi
+
+            if [ -f manifest.json ]; then
+              echo "Printing manifest.json..."
+              cat manifest.json
+              echo ""
+
+              echo "Creating artifact file..."
+
+              for ami in $(jq -r '.builds[-1].artifact_id' manifest.json | sed "s/,/ /g"); do
+                Region=$(echo $ami | cut -d ":" -f 1)
+                AmiId=$(echo $ami | cut -d ":" -f 2)
+                FormattedAmi="\"${Region}\": \"${AmiId}\""
+
+                placeholder=$(jq --arg mod $Region '.AMIDetails[$mod]' src/packer/ami_artifacts.json | cut -d '"' -f 2)
+                
+                echo "Updating artifacts file..."
+                
+                sed -i -e "s/$placeholder/$AmiId/g" src/packer/ami_artifacts.json
+              done 
+
+              echo 'The Packer build was successful!'
+              cat src/packer/ami_artifacts.json
+            else
+              echo 'manifest.json not created...'
+              echo 'The Packer build was not successful!'
+              exit 1
+            fi
+
+            egrep --text "${AWS_REGION}\:\sami\-" build.log | cut -d' ' -f2 > ami_id1.txt
+            sed -i.bak "s/<<AMI-ID>>/$(cat ami_id1.txt)/g" src/packer/ami_builder_event.json
+            aws events put-events --entries file://src/packer/ami_builder_event.json
+            echo "build completed on `date`"
+          fi
+
+artifacts:
+  files:
+    # Build Artifacts
+    - src/packer/ami_builder_event.json
+    - src/packer/ami_artifacts.json
+
+    # AutoDocs
+    - build.log
+  discard-paths: yes
+
+reports:
+  Build-Report:
+    files:
+      - 'TestReportBuild_${OperatingSystem}_${AmiRegion}.xml'
+    discard-paths: yes
+    file-format: JunitXml
+    base-directory: '${autodocsBaseDirectory}/reports'

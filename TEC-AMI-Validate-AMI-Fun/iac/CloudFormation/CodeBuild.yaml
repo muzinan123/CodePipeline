@@ -1,0 +1,66 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create S3 Bucket, Bucket Policy and KMS Key
+
+Parameters:
+  pProduct:
+    Description: Name of the instance
+    Type: String
+  pTeam:
+    Type: String
+  pRegion:
+    Type: String
+
+Resources:
+  # ------------
+  # CodeBuild
+  # ------------
+  rAppValidateCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${pProduct}-${pTeam}-AppValidate-${pRegion}
+      Description: This project is used to validate an application deployment
+      ServiceRole: CodePipeline-Action
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:2.0
+        EnvironmentVariables:
+        - Name: AWS_DEFAULT_REGION
+          Value: us-east-1
+        - Name: ENVIRONMENT
+          Value: !Ref pTeam
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: iac/CodeBuild/buildspec-appvalid.yaml
+      TimeoutInMinutes: 60
+      Tags:
+        - Key:  version
+          Value: ""
+        - Key:  apms-id
+          Value: ""
+        - Key: application-name
+          Value: ""
+        - Key: business-unit-n1
+          Value: ""
+        - Key: business-unit-n2
+          Value: ""
+        - Key: cost-center-id
+          Value: ""
+        - Key: environment-id
+          Value: ""
+        - Key: it-technical-owner
+          Value: ""
+        - Key: application-owner
+          Value: ""
+        - Key: DATA_CLASSIFICATION
+          Value: ""
+        - Key: asec-tier
+          Value: ""
+        - Key: asec-f
+          Value: ""
+        - Key: asec-add
+          Value: ""
+        - Key: asec-upd
+          Value: ""

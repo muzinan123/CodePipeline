@@ -1,0 +1,215 @@
+# TOOD: Can this be combined with the autoDocValidation action - build the JSON and then upload or is there value keeping it seperate?
+# NOTE: This may only be tool and configs
+# Purpose: Pull all relevant artifacts, parse through artifacts to identify required data for AutoDocs and build the AutoDocs payload
+version: 0.2
+
+env:
+  shell: bash
+  variables: 
+    vCreatedBy: "Takeda-CPE-Team"
+    toolsVersionArtifactFile: "reportTOOLversion.tmp"
+    osStatusArtifactFile: "reportOSstatus.tmp"
+    autodocsBaseDirectory: "test/autodocs"
+    pAPMSId: "ECS-CPE-Development"
+    pMasterAccountId: 144362435571
+    pMasterAccountRole: OrganizationReadOnly
+    pOrgAccessSession: OrgAccessSession.json
+    pOrgAccessProfileName: OrgAccess
+    pTargetAccountDetails: AccountDetails.json
+    orgAccessProfileRegion: us-east-1
+    orgAccessProfileOutput: json
+    orgAccountList: orgAccountList.json
+    
+phases:
+  install: 
+    runtime-versions: 
+      python: 3.8 
+  pre_build:
+    commands:
+      - export CommitID=${CODEBUILD_RESOLVED_SOURCE_VERSION}
+      - export sourceRegion=${AWS_REGION}
+      - export autodocsReport=${autodocsBaseDirectory}/autoDocsValidation.json
+      - orcArtifactVariable="\$CODEBUILD_SRC_DIR_${orcArtifactName}"
+      - amiArtifactVariable="\$CODEBUILD_SRC_DIR_${amiArtifactName}"
+      - orcArtifactPath=$(eval "echo $orcArtifactVariable")
+      - amiArtifactPath=$(eval "echo $amiArtifactVariable")
+      - echo $orcArtifactPath
+      - ls -l $orcArtifactPath
+      - echo $amiArtifactPath
+      - ls -l $amiArtifactPath
+      # TODO: Let's pull from the DynamoDB, OrgMetadata, in tec-cpe-shs-prd and pull from root rather than use Organizations for 'Functional'
+      # We're trying to limit the API calls to Organizations & provides us some coverage if the IAM role in Master gets locked down. 
+      - |
+          if [[ "$Environment" == "Development" ]]
+          then
+            packerArtifactFile="ami_artifacts.json"
+            AccountName='tec-cpe-shs-dev'
+            envTag='dev'
+            AccountId='875633494741'
+          elif [[ "$Environment" == "Test" ]]
+          then
+            packerArtifactFile="ami_artifacts_tst.json"
+            AccountName='tec-cpe-shs-tst'
+            envTag='tst'
+            AccountId='271554166616'
+          elif [[ "$Environment" == "Production" ]]
+          then
+            packerArtifactFile="ami_artifacts_prd.json"
+            AccountName='tec-cpe-shs-prd'
+            envTag='prd'
+            AccountId='012096835438'
+          elif [[ "$Environment" == "Functional" ]]
+          then
+            aws sts assume-role --role-arn "arn:aws:iam::${pMasterAccountId}:role/${pMasterAccountRole}" --role-session-name ${pOrgAccessProfileName} > ${pOrgAccessSession}
+            orgAccessAccessKeyId=$(jq -r .Credentials.AccessKeyId ${pOrgAccessSession})
+            orgAccessSecretAccessKey=$(jq -r .Credentials.SecretAccessKey ${pOrgAccessSession})
+            orgAccessSessionToken=$(jq -r .Credentials.SessionToken ${pOrgAccessSession})
+            aws configure set aws_access_key_id "${orgAccessAccessKeyId}" --profile ${pOrgAccessProfileName}
+            aws configure set aws_secret_access_key "${orgAccessSecretAccessKey}" --profile ${pOrgAccessProfileName}
+            aws configure set aws_session_token "${orgAccessSessionToken}" --profile ${pOrgAccessProfileName}
+            aws configure set region "${orgAccessProfileRegion}" --profile ${pOrgAccessProfileName}
+            aws configure set output "${orgAccessProfileOutput}" --profile ${pOrgAccessProfileName}
+
+            aws organizations list-accounts --profile ${pOrgAccessProfileName} > ${orgAccountList}            
+
+            orgAccountCount=$(jq -r .Accounts ${orgAccountList} | jq length)
+
+            echo "Searching for Share accounts .."
+
+            validAccountFound=0
+
+            while [ $validAccountFound -eq 0 ]
+            do
+                trgAccountRandomIndex=$(shuf -i 1-${orgAccountCount} -n 1)
+                trgAccountId=$(jq -r --argjson Idx $trgAccountRandomIndex '.Accounts[$Idx].Id' ${orgAccountList})
+                echo "Verifying ${trgAccountId}"
+                for trgParent in $(aws organizations --profile ${pOrgAccessProfileName}  list-parents --child-id ${trgAccountId} | jq -r .Parents[].Id)
+                do
+                    case ${trgParentId} in 
+                        "ou-n8qp-m1p4f0fk" | "ou-n8qp-upszqowu" | "ou-n8qp-8knpr8xn" | "ou-n8qp-cawqx94u" | "ou-n8qp-wlnjggil" )
+                            echo "${trgAccountId} can not be used. Part of OU ${trgParentId}."
+                            validAccountFound=0
+                            ;;
+                        *)
+                            validAccountFound=1
+                            ;;
+                    esac
+                    if [ $validAccountFound -eq 0 ]
+                    then
+                        break
+                    fi
+                done
+            done
+            echo "Found account for AutoDocs"
+            aws organizations describe-account --account-id $trgAccountId --profile ${pOrgAccessProfileName} > ${trgAccountId}.${pTargetAccountDetails}
+            trgAccountName=$(jq -r .Account.Name ${trgAccountId}.${pTargetAccountDetails})
+            packerArtifactFile="ami_artifacts_prd.json"
+            envTag=$(echo ${trgAccountName} | cut -d "-" -f4)
+            AccountId=$trgAccountId
+            AccountName=$trgAccountName
+            echo "Account Name: ${AccountName}"
+            echo "Account ID: ${AccountId}"
+            echo "Environment: ${envTag}"
+          else
+            echo "Incorrect parameter Environment"
+            exit 1
+          fi
+      - export packerArtifact=${amiArtifactPath}/${packerArtifactFile}
+      - export packerBuildLog=${amiArtifactPath}/build.log
+      - export toolsVersionArtifact=${orcArtifactPath}/${toolsVersionArtifactFile}
+      - export osStatusArtifact=${orcArtifactPath}/${osStatusArtifactFile}
+      - cat ${packerArtifact}
+  build:
+    commands:
+      - | 
+          echo "Commit ID: ${CommitID}"
+          echo "CodeBuild ID: $CODEBUILD_BUILD_ID"
+          echo "CodeBuild Build Number: $CODEBUILD_BUILD_NUMBER"
+
+      - echo "Inititating AutoDoc"
+      - cp ${autodocsBaseDirectory}/templates/autoDocsValidation.json.template ${autodocsReport}
+
+      - echo "Fetching AMI Details from Build artifact .."
+
+      # Generating AMI Name
+      - export countryCode=$(jq -r '.Metadata.Regions["us-east-1"]["Country"]' src/packer/ami_artifacts.json)
+      - export locationCode=$(jq -r '.Metadata.Regions["us-east-1"]["Location"]' src/packer/ami_artifacts.json)
+      - export purposeCode=$(jq -r '.Metadata.PurposeCode' src/packer/ami_artifacts.json)
+      - export osName=$(jq -r '.Metadata.Osname' src/packer/ami_artifacts.json)
+      - export osVersion=$(jq -r '.Metadata.Osversion' src/packer/ami_artifacts.json)
+      - export amiVersion=$(cat CHANGELOG.md | grep '####' | head -1 | awk -F'[][]' '{print $2}')
+      - export pAmiName="X${countryCode}${locationCode}${purposeCode}${osName}${osVersion}v${amiVersion}"
+
+      # AMI details
+      - jq --arg AmiName $pAmiName '.AmiName = $AmiName' ${autodocsReport} > ${autodocsReport}.tmp && mv ${autodocsReport}.tmp ${autodocsReport} 
+      - jq --arg APMSId $pAPMSId '.APMSId = $APMSId' ${autodocsReport} > ${autodocsReport}.tmp && mv ${autodocsReport}.tmp ${autodocsReport} 
+      - |
+          for ami in $(jq -c '.AMIDetails' ${packerArtifact} | sed "s/,/ /g"); do
+            Region=$(echo $ami | cut -d ":" -f 1 | cut -d '"' -f 2)
+            AmiId=$(echo $ami | cut -d ":" -f 2 | cut -d '"' -f 2)
+            FormattedAmi="\"${Region}\": \"${AmiId}\""
+            echo "AMI ID: $AmiId; Region: $Region"
+            jq --arg AmiId $AmiId --arg Region $Region '.AmiInfo += [{"AMIId": $AmiId, "Region": $Region}]' ${autodocsReport} > ${autodocsReport}.tmp
+            mv ${autodocsReport}.tmp ${autodocsReport}
+          done
+
+      # Build Details
+      - echo "Get AWS details from environment variables"
+      - jq --arg CommitID $CommitID '.AmiCommitID = $CommitID' ${autodocsReport} > ${autodocsReport}.tmp && mv ${autodocsReport}.tmp ${autodocsReport} 
+      - jq --arg Region $sourceRegion '.Region = $Region' ${autodocsReport} > ${autodocsReport}.tmp && mv ${autodocsReport}.tmp ${autodocsReport} 
+      - jq --arg AccountId $AccountId '.AccountId = $AccountId' ${autodocsReport} > ${autodocsReport}.tmp && mv ${autodocsReport}.tmp ${autodocsReport} 
+      - jq --arg AccountName $AccountName '.AccountName = $AccountName' ${autodocsReport} > ${autodocsReport}.tmp && mv ${autodocsReport}.tmp ${autodocsReport}
+      - jq --arg Environment $envTag '.Environment = $Environment' ${autodocsReport} > ${autodocsReport}.tmp && mv ${autodocsReport}.tmp ${autodocsReport}
+
+      # Version Details
+      - echo "Fetching tool versions ..."
+      - |
+          sed -i 's/[[:blank:]]//g' ${toolsVersionArtifact}
+          sed -i '/^[[:space:]]*$/d' ${toolsVersionArtifact}
+      - |
+          while IFS= read -r tool
+          do
+            ToolName=$(echo $tool | cut -d":" -f1)
+            ActualVersion=$(echo $tool | cut -d":" -f2)
+            echo "ToolName=$ToolName ActualVersion=$ActualVersion"
+            jq --arg ToolName $ToolName --arg ActualVersion $ActualVersion '.ToolsInstalled += [{"ToolName": $ToolName, "ActualVersion": $ActualVersion}]' ${autodocsReport} > ${autodocsReport}.tmp && mv ${autodocsReport}.tmp ${autodocsReport}
+          done < "${toolsVersionArtifact}"
+
+      # Config Details
+      - echo "Fetcing additional OS configurations"
+      - |
+          sed -i 's/[[:blank:]]//g' ${osStatusArtifact}
+          sed -i '/^[[:space:]]*$/d' ${osStatusArtifact}
+      - |
+          while IFS= read -r config
+          do
+            Name=$(echo $config | cut -d":" -f1)
+            ActualValue=$(echo $config | cut -d":" -f2)
+            echo "Name=$Name ActualValue=$ActualValue"
+            jq --arg Name $Name --arg ActualValue $ActualValue '.AdditionalConfigurations += [{"Name": $Name, "ActualValue": $ActualValue}]' ${autodocsReport} > ${autodocsReport}.tmp && mv ${autodocsReport}.tmp ${autodocsReport} 
+          done < "${osStatusArtifact}"
+
+  post_build:
+    commands:
+      - ls -l ${autodocsBaseDirectory}
+      - sed -i 's/\\r//g' ${autodocsReport} 
+      - cat ${autodocsReport} 
+      - |
+          if [[ "$Environment" == "Functional" ]]
+          then
+            echo "Generating AMI validation payload for ${trgAccountName}."
+
+            funcPackerArtifactFile="ami_artifacts_functional.json"
+            funcPackerArtifact=${amiArtifactPath}/${funcPackerArtifactFile}
+
+            jq --arg AccountId $AccountId '. += {"AccountId": $AccountId} ' ${packerArtifact} > ${funcPackerArtifact}
+            sed -i "s/functional/$envTag/g" ${funcPackerArtifact}
+
+            echo "AMI Details for functional account:"
+            cat ${funcPackerArtifact}
+          fi
+artifacts:
+  files:
+    - ${autodocsReport}
+    - '${amiArtifactPath}/**/*'
+  discard-paths: yes

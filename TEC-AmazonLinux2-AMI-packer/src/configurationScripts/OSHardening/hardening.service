@@ -1,0 +1,12 @@
+[Unit]
+Description=Run hardening script at startup
+After=network.target
+After=systemd-user-sessions.service
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /home/ec2-user/tec-security-ami-amzn2-hardening.sh
+
+[Install]
+WantedBy=default.target

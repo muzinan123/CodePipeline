@@ -1,0 +1,122 @@
+# Purpose: Copy and encrypt the newly minted AMI to all regions
+# Note: While this could be done via the initial Packer build, this allows for more rapid development and less orphaned AMIs 
+# as they are not copied to other regions until they pass the initial smoke test
+
+version: 0.2
+
+env:
+  shell: bash
+  variables: 
+    srcAmiRegion: "us-east-1"
+    artifact_list: "ami_artifacts.json"
+phases:
+  install: 
+    on-failure: ABORT
+    runtime-versions: 
+      python: 3.8 
+    commands:
+      # Printing versions used for Compliance
+      - echo 'Printing versions of software used for compliance...'
+      - bashVersion=$(bash --version)
+      - | 
+          echo "Bash Version: $bashVersion"
+      - pythonVesion=$(python3 --version)
+      - |
+          echo "Python Version: $pythonVesion"
+      - awsVersion=$(/usr/local/bin/aws --version)
+      - |
+          echo "AWS CLI Version: ${awsVersion}"
+
+  pre_build:
+    on-failure: ABORT
+    commands:
+
+      - echo "Setting path for Artifact ..."
+      - ArtifactVariable="\$CODEBUILD_SRC_DIR_${ArtifactName}"
+      - artifactPath=$(eval "echo $ArtifactVariable")
+      - echo $artifactPath
+      - ls -l $artifactPath
+      - echo "Fetching Source AMI Id from $srcAmiRegion ..."
+      - export srcAmiId=`cat ${artifactPath}/${artifact_list} | jq --arg AmiRegion "$srcAmiRegion" -r '.AMIDetails | .[$AmiRegion]'`
+      - |
+          echo "Source AMI Id: ${srcAmiId}"
+  build:
+    commands:
+      - | 
+          echo "Commit ID: $CODEBUILD_RESOLVED_SOURCE_VERSION"
+          echo "CodeBuild ID: $CODEBUILD_BUILD_ID"
+          echo "CodeBuild Build Number: $CODEBUILD_BUILD_NUMBER"
+      - echo 'Beginning AMI copy...'
+      - |
+          declare -A amiList
+          declare -A regionKey
+          declare -A amiTags
+          export tagChain=""
+          export amiList=( ["${srcAmiRegion}"]="${srcAmiId}" )
+          echo -n "Extracting Tags from ${srcAmiId} ..."
+          aws ec2 describe-tags --filters "Name=resource-id,Values=${srcAmiId}" --query Tags[].[Key,Value] --output text > amitags.list
+          echo "Done"
+          echo "------------------------"
+          cat amitags.list
+          echo "------------------------"
+          while IFS= read -r tagitem
+          do
+            keyname=`echo $tagitem | cut -d' ' -f1`
+            keyvalue=`echo $tagitem | cut -d' ' -f2`
+            amiTags+=( ["${keyname}"]="${keyvalue}"  )
+            export tagChain="${tagChain} Key=${keyname},Value=${keyvalue}"
+          done < "amitags.list"
+          
+          echo -n "Setting KMS Keys Maps..."
+          regionKey=( 
+            ["us-east-1"]="arn:aws:kms:us-east-1:012096835438:key/0bf85fdb-196b-4bef-bfda-736a1904bd64" 
+            ["us-west-2"]="arn:aws:kms:us-west-2:012096835438:key/c90420f2-cfa2-4772-95c5-54d04ac69773" 
+            ["eu-central-1"]="arn:aws:kms:eu-central-1:012096835438:key/a9288af0-9516-4841-bd56-ef2edb2f58c5" 
+            ["eu-west-1"]="arn:aws:kms:eu-west-1:012096835438:key/1fd7a155-3c69-4ee5-bc66-97d1c55d9372" 
+            ["ap-southeast-1"]="arn:aws:kms:ap-southeast-1:012096835438:key/75cf0f15-ecdf-4f88-948b-96faad231407" 
+            ["ap-northeast-1"]="arn:aws:kms:ap-northeast-1:012096835438:key/e13b84d7-4940-45be-86b9-d20a0396b468" 
+          )
+          echo "Done"
+          echo ""
+          for region in ${!regionKey[@]}; do
+            [ "${region}" == "${srcAmiRegion}" ] && continue
+            echo -n "Initiating copying $srcAmiId to ${region} .. "
+            trgamiid=`aws ec2 copy-image \
+              --encrypted \
+              --kms-key-id ${regionKey[${region}]} \
+              --source-image-id $srcAmiId \
+              --source-region ${srcAmiRegion} \
+              --region ${region} \
+              --name "${amiTags[Name]}" --output text --query ImageId`
+            amiList+=( ["${region}"]="${trgamiid}" )
+            export amiList
+            echo "target AMI Id: $trgamiid"
+          done
+          echo ""
+          for region in ${!amiList[@]}; do
+            echo -n "Waiting for ${amiList[${region}]} in ${region} .. " 
+            aws ec2 wait image-available --image-ids ${amiList[${region}]} --region ${region}
+            aws ec2 create-tags \
+              --resources ${amiList[${region}]} \
+              --region ${region} \
+              --tags ${tagChain}
+            echo "AVAILABLE"
+          done
+          echo ""
+          echo "Updating Artifact ${artifact_list}"
+          sed -i.bak "s/<<AMI-ID2>>/${amiList[us-west-2]}/g" ${artifactPath}/${artifact_list}
+          sed -i.bak "s/<<AMI-ID3>>/${amiList[eu-west-1]}/g" ${artifactPath}/${artifact_list}
+          sed -i.bak "s/<<AMI-ID4>>/${amiList[eu-central-1]}/g" ${artifactPath}/${artifact_list}
+          sed -i.bak "s/<<AMI-ID5>>/${amiList[ap-southeast-1]}/g" ${artifactPath}/${artifact_list}
+          sed -i.bak "s/<<AMI-ID6>>/${amiList[ap-northeast-1]}/g" ${artifactPath}/${artifact_list}
+      - echo 'Completed AMI copy...'
+  post_build:
+    commands:
+      - |
+          echo "Artifact details"
+          cat ${artifactPath}/${artifact_list}
+
+artifacts:
+  files:
+    - ${artifactPath}/**/*
+  discard-paths: yes

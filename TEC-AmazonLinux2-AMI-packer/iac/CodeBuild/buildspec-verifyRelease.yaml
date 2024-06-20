@@ -1,0 +1,166 @@
+# Purpose: Validate that the parameter store key/value pair was created, a DynamoDB entry created & SNS topic received a notification
+version: 0.2
+
+env:
+  shell: bash
+  variables: 
+    failedTestCases: 0
+    pAutoDocReportFile: autoDocsValidation.json
+    pProdAccountId: 012096835438
+    pProdAccountRole: Shared-Lambda-Action
+    pProdAccessSession: ProdAccessSession.json
+    pProdAccessProfileName: ProdAccess
+    pProdAccessProfileOutput: json
+    pDefaultRegion: us-east-1
+    pAmiDetailTable: TEC-AMI-Details
+    pDynamoResult: amiSearchDynamoResult.json
+    autodocsBaseDirectory: "test/autodocs"
+
+phases:
+  install: 
+    runtime-versions: 
+      python: 3.8 
+    commands:
+      - ls 
+      - ls test/autodocs
+      - ls $autodocsBaseDirectory
+      - echo $autodocsBaseDirectory
+      - pwd
+      - echo 'Printing versions of software used for compliance...'
+      - bashVersion=$(bash --version)
+      - | 
+          echo "Bash Version: $bashVersion"
+      - pythonVesion=$(python3 --version)
+      - |
+          echo "Python Version: $pythonVesion"
+      - awsVersion=$(/usr/local/bin/aws --version)
+      - |
+          echo "AWS CLI Version: $awsVersion"
+  pre_build:
+    commands:
+      - echo "Setting path for Artifact ..."
+      - AutoDocsPreparationArtifactVariable="\$CODEBUILD_SRC_DIR_${AutoDocsPreparationArtifactName}"
+      - AutoDocsPreparationArtifactPath=$(eval "echo $AutoDocsPreparationArtifactVariable")
+      - echo $AutoDocsPreparationArtifactPath
+      - ls -l $AutoDocsPreparationArtifactPath
+      - export pAutoDocReport=${AutoDocsPreparationArtifactPath}/${pAutoDocReportFile}
+      - cat ${pAutoDocReport}
+      # Prepare Reports directory & artifacts
+      - mkdir -p ${autodocsBaseDirectory}/reports
+      - export pDynamoDBExpAttr=${autodocsBaseDirectory}/dynamodbAMISearch.json
+  build:
+    commands:
+      - echo "Inititating Release Verification" 
+
+      # Credentials to check Production resources
+      - echo "Creating Production session ..."
+      - |
+          aws sts assume-role --role-arn "arn:aws:iam::${pProdAccountId}:role/${pProdAccountRole}" --role-session-name ${pProdAccessProfileName} > ${pProdAccessSession}
+          ProdAccessAccessKeyId=$(jq -r .Credentials.AccessKeyId ${pProdAccessSession})
+          ProdAccessSecretAccessKey=$(jq -r .Credentials.SecretAccessKey ${pProdAccessSession})
+          ProdAccessSessionToken=$(jq -r .Credentials.SessionToken ${pProdAccessSession})
+          aws configure set aws_access_key_id "${ProdAccessAccessKeyId}" --profile ${pProdAccessProfileName}
+          aws configure set aws_secret_access_key "${ProdAccessSecretAccessKey}" --profile ${pProdAccessProfileName}
+          aws configure set aws_session_token "${ProdAccessSessionToken}" --profile ${pProdAccessProfileName}
+          aws configure set output "${pProdAccessProfileOutput}" --profile ${pProdAccessProfileName}
+          aws sts get-caller-identity --profile ${pProdAccessProfileName} --region ${pDefaultRegion}
+
+      # AutoDocs Metadata
+      - echo "Fetching parameters from AutoDoc ..."
+      - export pAmiPlatform=$(jq -r '.ShortVersion' src/packer/ami_artifacts.json)
+      - | 
+          case ${pAmiPlatform} in
+            RHEL7)
+              OperatingSystem="RHEL7"
+              dbOperatingSystem="REDHATENTERPRISELINUX7"
+              ;;
+            RHEL8)
+              OperatingSystem="RHEL8"
+              dbOperatingSystem="REDHATENTERPRISELINUX8"
+              ;;
+            Server2019)
+              OperatingSystem="Windows2019"
+              dbOperatingSystem="WINDOWS2019"
+              ;;
+            Server2016)
+              OperatingSystem="Windows2016"
+              dbOperatingSystem="WINDOWS2016"
+              ;;
+            *)
+              echo "Incorrect Platform detected ..."
+              exit 1
+              ;;
+          esac
+      
+      # Release Verification Tests
+      - echo "Performing Release verification ..."
+      - |
+          for pRegion in $(jq -r .AmiInfo[].Region ${pAutoDocReport})
+          do 
+              pAMIId=$(jq --arg pRegion ${pRegion} '.AmiInfo[] | select(. | (.Region == $pRegion)) ' ${pAutoDocReport} | jq -r .AMIId)
+
+              cp ${autodocsBaseDirectory}/templates/dynamodbAMISearch.json.template ${pDynamoDBExpAttr}
+              sed -i  "s/Platform/$dbOperatingSystem/g" ${pDynamoDBExpAttr}
+
+              aws dynamodb query --table-name ${pAmiDetailTable} --key-condition-expression "Operatingsystem=:Operatingsystem" --expression-attribute-values file://${pDynamoDBExpAttr} --region $pRegion --profile ${pProdAccessProfileName} > ${pDynamoResult}
+
+              recordCount=$(jq .Items $pDynamoResult | jq length)
+              latestIdx=0
+              recordIdx=0
+              latestDate="20000101000000000000"
+
+              while [ $recordIdx -lt $recordCount ] 
+              do
+                  recDate=$(jq -r --argjson Idx $recordIdx '.Items[$Idx].CreatedDate.S' $pDynamoResult | tr -d - | tr -d ' ' | tr -d ':' | tr -d .)
+                  if [[ "$latestDate" -lt "$recDate" ]]
+                  then
+                      latestDate=$recDate
+                      latestIdx=$recordIdx
+                  fi
+                  recordIdx=$((recordIdx+1))
+              done
+              
+              pDynamoDBAMIId=$(jq -r --argjson Idx $latestIdx '.Items[$Idx].AMIId.S' $pDynamoResult)
+
+              if [[ ${pDynamoDBAMIId} != ${pAMIId} ]]; then
+                  echo "${OperatingSystem} Golden AMI - ${pAMIId} .. MISMATCHED in DynamoDB at ${pRegion}. Found ${pDynamoDBAMIId}. "
+                  echo "${pRegion}: FAIL" >> ${autodocsBaseDirectory}/reports/ReleaseVerificationServiceStatus.txt
+                  (( failedTestCases ++ ))
+              else
+                  echo "${OperatingSystem} Golden AMI - ${pAMIId} .. MATCHED in DynamoDB at ${pRegion}"
+                  echo "${pRegion}: PASS" >> ${autodocsBaseDirectory}/reports/ReleaseVerificationServiceStatus.txt
+              fi
+          done
+      - export releaseTestReport=${autodocsBaseDirectory}/reports/TestReportRelease_${OperatingSystem}.xml
+      - cat ${autodocsBaseDirectory}/reports/ReleaseVerificationServiceStatus.txt | grep PASS > ${autodocsBaseDirectory}/reports/ReleaseVerificationReport.tmp
+      - ${autodocsBaseDirectory}/generate_test_reportReleaseVerify.sh ${OperatingSystem} ${pDefaultRegion} ${releaseTestReport} ${autodocsBaseDirectory}
+      - |
+          if [[ ${failedTestCases} > 0 ]]; then
+            echo "Release verification failed."
+            exit 1
+          else
+            echo "Release verification completed successfully."
+          fi
+  post_build:
+    commands:
+      - ls -l ${autodocsBaseDirectory}/reports/ReleaseVerificationServiceStatus.txt
+      - cat ${autodocsBaseDirectory}/reports/ReleaseVerificationServiceStatus.txt
+
+reports:
+  Release-Verification-Report:
+    files:
+      - 'TestReportRelease_${OperatingSystem}.xml'
+    discard-paths: yes
+    file-format: JunitXml
+    base-directory: '${autodocsBaseDirectory}/reports'
+artifacts:
+  files:
+    - ReleaseVerificationServiceStatus.txt
+  discard-paths: yes
+  base-directory: '${autodocsBaseDirectory}/reports'
+  secondary-artifacts:
+    ami_release_results:
+      files:
+        - '**/*'
+      discard-paths: yes
+      base-directory: '${autodocsBaseDirectory}/reports'

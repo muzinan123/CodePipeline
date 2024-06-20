@@ -1,0 +1,14 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+        python: 3.7
+  build:
+    commands:
+      - aws lambda invoke --function-name TEC-AMI-Validate-AMI-Fun /tmp/test-output
+
+artifacts:
+  files:
+    - /tmp/test-output
+  discard-paths: yes

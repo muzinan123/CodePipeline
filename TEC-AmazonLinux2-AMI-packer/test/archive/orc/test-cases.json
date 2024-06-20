@@ -1,0 +1,15 @@
+{
+    "Parameters": {
+        "commands": [
+            "echo TECCPE Services verification started.",
+            "systemctl list-units | grep amazon-ssm-agent #amazon-ssm-agent",
+            "systemctl list-units | grep falcon-sensor #falcon-sensor",
+            "systemctl list-units | grep ir_agent #ir_agent",
+            "systemctl list-units | grep sshd.service #sshd",
+            "sudo -H -u ansible bash -c 'if [ `ls -l ~/.local/bin/ansible | wc -l` -eq 1 ]; then echo Ansible active ; fi' #Ansible",
+            "if [ -f /usr/local/bin/aws ]; then echo AWS-Cli active ; fi #AWS-Cli",
+            "InstanceId=$(curl -s http://169.254.169.254/latest/meta-data/instance-id) ; InstanceName=$(aws ec2 describe-tags --filters Name=resource-id,Values=$InstanceId --output=text | grep Name | cut -f5) ; tagHostname=${InstanceName,,} ; actHostname=$(hostname -s) ; if [ $actHostname == $tagHostname ]; then echo Hostname-Update active; fi #Hostname-Update",
+            "echo TECCPE Services verification completed."
+        ]
+    }
+}
